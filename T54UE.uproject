@@ -1,0 +1,23 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "{933E1ECB-4F21-D7D0-BF96-FA8AD9CA6796}",
+	"Category": "",
+	"Description": "",
+	"Modules": [
+		{
+			"Name": "T54UE",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{ "Name": "T5Data", "Enabled": true },
+		{
+			"Name": "ModelingToolsEditorMode",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		}
+	]
+}

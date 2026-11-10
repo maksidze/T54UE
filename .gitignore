@@ -1,0 +1,41 @@
+# Skyrim installation files and local mod resources
+/Data
+*.esm
+*.esp
+*.esl
+*.bsa
+*.ba2
+/Plugins/T5Data/Resources/RaceMenu
+
+# Local Skyrim imports and editor experiments. Runtime assets live in Plugins/T5Data/Content.
+/Content/
+
+# Unreal outputs, logs, captures, and saves
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+/Build/Windows/FileOpenOrder/
+/Releases/
+*.log
+*.dll
+*.exe
+*.lib
+*.pdb
+*.pak
+*.ucas
+*.utoc
+*.7z
+*.zip
+
+# Generated IDE files and local caches
+.vs/
+.idea/
+*.sln
+*.slnx
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+__pycache__/
+*.py[cod]

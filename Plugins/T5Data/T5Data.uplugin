@@ -1,0 +1,11 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1",
+  "FriendlyName": "T5 Data",
+  "Description": "Reads T5 plugins and resources into a transient Unreal scene.",
+  "Category": "Runtime",
+  "CanContainContent": true,
+  "SupportedTargetPlatforms": ["Win64"],
+  "Modules": [{ "Name": "T5Data", "Type": "Runtime", "LoadingPhase": "Default", "PlatformAllowList": ["Win64"] }]
+}

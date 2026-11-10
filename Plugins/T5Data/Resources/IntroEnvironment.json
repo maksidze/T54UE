@@ -1,0 +1,7 @@
+{
+  "schema": "t54.initial-environment/1",
+  "worldspace": "0000003C",
+  "initial_weather": "000C821E",
+  "source_session": "2026-11-08T17-11-52-947Z_pid63368",
+  "note": "Initial condition only. Subsequent weather follows region boundaries and Papyrus overrides; no recorded timeline or actor motion is replayed."
+}

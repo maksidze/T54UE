@@ -1,12 +1,14 @@
 #include "T5MapBrowser.h"
 
 #include "T5Scene.h"
+#include "T5MenuStyle.h"
 #include "InputCoreTypes.h"
 #include "Rendering/DrawElements.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SSearchBox.h"
 #include "Widgets/Input/SSpinBox.h"
+#include "Widgets/Images/SImage.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/SBoxPanel.h"
@@ -20,12 +22,14 @@ public:
     SLATE_BEGIN_ARGS(ST5CellGrid) {}
         SLATE_ATTRIBUTE(FIntPoint, Cell)
         SLATE_EVENT(FOnIntPointChanged, OnCellPicked)
+        SLATE_ARGUMENT(TSharedPtr<FT5UIResources>, Resources)
     SLATE_END_ARGS()
 
     void Construct(const FArguments& Args)
     {
         Cell = Args._Cell;
         OnCellPicked = Args._OnCellPicked;
+        Resources = Args._Resources;
     }
 
     void SetWorld(const FT5Location* Map, double Scale, FVector2D Offset)
@@ -62,6 +66,7 @@ private:
     TArray<FIntRect> Runs;
     TArray<FIntPoint> Names;
     FIntRect Bounds;
+    TSharedPtr<FT5UIResources> Resources;
     double MapScale = 1;
     FVector2D MapOffset = FVector2D::ZeroVector;
 
@@ -79,26 +84,27 @@ private:
         const auto* Brush = FCoreStyle::Get().GetBrush(TEXT("WhiteBrush"));
         double Step;
         const FVector2D Corner = TopLeft(Geometry.GetLocalSize(), Step);
-        const auto Draw = [&](int32 DrawLayer, FVector2D Position, FVector2D Size, FLinearColor Color)
+        const auto Draw = [&](int32 DrawLayer, FVector2D Position, FVector2D Size, FLinearColor Color, const FSlateBrush* Image = nullptr)
         {
             FSlateDrawElement::MakeBox(Out, DrawLayer, Geometry.ToPaintGeometry(FVector2f(Size),
-                FSlateLayoutTransform(FVector2f(Position))), Brush, ESlateDrawEffect::None, Color);
+                FSlateLayoutTransform(FVector2f(Position))), Image ? Image : Brush, ESlateDrawEffect::None, Color);
         };
-        Draw(Layer, Corner, FVector2D(Bounds.Size()) * Step, FLinearColor(.025f, .037f, .045f));
+        Draw(Layer, Corner, FVector2D(Bounds.Size()) * Step, FLinearColor(.02f, .02f, .02f));
         for (const auto& Run : Runs)
             Draw(Layer + 1, Corner + FVector2D(Run.Min.X - Bounds.Min.X, Bounds.Max.Y - Run.Max.Y) * Step,
-                FVector2D(Run.Size()) * Step, FLinearColor(.08f, .16f, .18f));
+                FVector2D(Run.Size()) * Step, FLinearColor(.11f, .12f, .11f));
         for (FIntPoint Point : Names)
             Draw(Layer + 2, Corner + FVector2D(Point.X - Bounds.Min.X, Bounds.Max.Y - Point.Y - 1) * Step,
-                FVector2D(Step, Step), FLinearColor(.19f, .38f, .40f));
+                FVector2D(Step, Step), FLinearColor(.32f, .33f, .29f));
         if (MapScale >= 0 && !Runs.IsEmpty())
         {
             const FVector2D Point = (FVector2D(Cell.Get()) + FVector2D(.5)) * MapScale + MapOffset;
             if (Point.X >= Bounds.Min.X && Point.X < Bounds.Max.X && Point.Y >= Bounds.Min.Y && Point.Y < Bounds.Max.Y)
             {
-                const double Dot = FMath::Max(5.0, Step);
-                Draw(Layer + 3, Corner + FVector2D(Point.X - Bounds.Min.X, Bounds.Max.Y - Point.Y) * Step - FVector2D(Dot / 2),
-                    FVector2D(Dot, Dot), FLinearColor(.93f, .54f, .18f));
+                const auto* Marker = Resources ? Resources->GetBrush(TEXT("MapSelection")) : nullptr;
+                const FVector2D IconSize = Marker ? FVector2D(12, 27) : FVector2D(FMath::Max(5.0, Step));
+                Draw(Layer + 3, Corner + FVector2D(Point.X - Bounds.Min.X, Bounds.Max.Y - Point.Y) * Step - IconSize * .5,
+                    IconSize, FLinearColor::White, Marker);
             }
         }
         return Layer + 3;
@@ -137,21 +143,27 @@ FString FT5Location::Label() const
 void ST5MapBrowser::Construct(const FArguments&, AT5Scene* InOwner)
 {
     Owner = InOwner;
+    const auto Resources = InOwner->UIResources;
     const auto Visibility = [this] { return Selected && !Selected->bInterior ? EVisibility::Visible : EVisibility::Collapsed; };
     ChildSlot
     .HAlign(HAlign_Center).VAlign(VAlign_Center)
     [
         SNew(SBorder).Padding(18)
         .BorderImage(FCoreStyle::Get().GetBrush(TEXT("WhiteBrush")))
-        .BorderBackgroundColor(FLinearColor(.024f, .032f, .042f, .97f))
+        .BorderBackgroundColor(FLinearColor(.014f, .014f, .014f, .91f))
         [
             SNew(SBox).WidthOverride(910).HeightOverride(600)
             [
                 SNew(SVerticalBox)
                 + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
                 [
-                    SNew(STextBlock).Text(FText::FromString(TEXT("T5 Maps")))
-                    .Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 22))
+                    SNew(SHorizontalBox)
+                    + SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 12, 0)
+                    [SNew(SBox).WidthOverride(22).HeightOverride(27)
+                        [SNew(SImage).Image(T5MenuArt(Resources, TEXT("MapTown"), false))]]
+                    + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)
+                    [SNew(STextBlock).Text(FText::FromString(TEXT("КАРТА  /  ЛОКАЦИИ")))
+                        .Font(T5MenuFont(Resources, 22, TEXT("Regular")))]
                 ]
                 + SVerticalBox::Slot().AutoHeight()
                 [SNew(SSearchBox).HintText(FText::FromString(TEXT("Search world, interior, plugin or FormID"))).OnTextChanged(this, &ST5MapBrowser::Filter)]
@@ -163,12 +175,17 @@ void ST5MapBrowser::Construct(const FArguments&, AT5Scene* InOwner)
                         SAssignNew(List, SListView<TSharedPtr<FT5Location>>)
                     .ListItemsSource(&Items)
                         .OnSelectionChanged(this, &ST5MapBrowser::Select)
-                        .OnGenerateRow_Lambda([](TSharedPtr<FT5Location> Item, const TSharedRef<STableViewBase>& Table)
+                        .OnGenerateRow_Lambda([Resources](TSharedPtr<FT5Location> Item, const TSharedRef<STableViewBase>& Table)
                         {
                             return SNew(STableRow<TSharedPtr<FT5Location>>, Table).Padding(FMargin(6, 3))
                             [
-                                SNew(STextBlock).Text(FText::FromString(Item->Label()))
-                                .Font(FCoreStyle::GetDefaultFontStyle(TEXT("Regular"), 13))
+                                SNew(SHorizontalBox)
+                                + SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 8, 0)
+                                [SNew(SBox).WidthOverride(14).HeightOverride(17)
+                                    [SNew(SImage).Image(T5MenuArt(Resources, Item->bInterior ? TEXT("MapDoor") : TEXT("MapTown"), false))]]
+                                + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)
+                                [SNew(STextBlock).Text(FText::FromString(Item->Label()))
+                                    .Font(T5MenuFont(Resources, 13, TEXT("Regular")))]
                             ];
                         })
                     ]
@@ -180,11 +197,12 @@ void ST5MapBrowser::Construct(const FArguments&, AT5Scene* InOwner)
                             + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
                             [
                                 SNew(STextBlock).Text(FText::FromString(TEXT("World map grid")))
-                                .Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 14))
+                                .Font(T5MenuFont(Resources, 14, TEXT("Bold")))
                             ]
                             + SVerticalBox::Slot().FillHeight(1)
                             [
                                 SAssignNew(Overview, ST5CellGrid)
+                                .Resources(Resources)
                                 .Cell_Lambda([this] { return FIntPoint(CellX, CellY); })
                                 .OnCellPicked_Lambda([this](FIntPoint Cell)
                                 {
@@ -206,7 +224,7 @@ void ST5MapBrowser::Construct(const FArguments&, AT5Scene* InOwner)
                 + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
                 [
                     SNew(STextBlock).Text(this, &ST5MapBrowser::Details)
-                    .Font(FCoreStyle::GetDefaultFontStyle(TEXT("Regular"), 13))
+                    .Font(T5MenuFont(Resources, 13, TEXT("Regular")))
                 ]
                 + SVerticalBox::Slot().AutoHeight()
                 [
@@ -242,12 +260,12 @@ void ST5MapBrowser::Construct(const FArguments&, AT5Scene* InOwner)
                     + SHorizontalBox::Slot().FillWidth(1) [SNew(SSpacer)]
                     + SHorizontalBox::Slot().AutoWidth().Padding(8, 0)
                     [
-                        SNew(SButton).Text(FText::FromString(TEXT("Load"))).OnClicked(this, &ST5MapBrowser::Load)
+                        SNew(SButton).ButtonStyle(T5MenuButtonStyle()).Text(FText::FromString(TEXT("Загрузить"))).OnClicked(this, &ST5MapBrowser::Load)
                         .IsEnabled_Lambda([this] { return Selected.IsValid(); })
                     ]
                     + SHorizontalBox::Slot().AutoWidth()
                     [
-                        SNew(SButton).Text(FText::FromString(TEXT("Close"))).OnClicked_Lambda([this]
+                        SNew(SButton).ButtonStyle(T5MenuButtonStyle()).Text(FText::FromString(TEXT("[Esc]  Назад"))).OnClicked_Lambda([this]
                         {
                             if (auto* Scene = Owner.Get())
                                 Scene->CloseMapBrowser();

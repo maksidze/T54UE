@@ -94,7 +94,7 @@ void AT5Scene::TickAnimations()
     {
         if (Ragdolled.Contains(Id)) continue;
         const bool bLocomotion = Request.Event == TEXT("T5Idle") || Request.Event == TEXT("T5Walk")
-            || Request.Event == TEXT("T5Jog") || Request.Event == TEXT("T5Run");
+            || Request.Event == TEXT("T5FastWalk") || Request.Event == TEXT("T5Jog") || Request.Event == TEXT("T5Run");
         auto* Existing = ReferenceAnimations.Find(Id);
         if (Existing && (*Existing)->Serial != Request.Serial)
         {

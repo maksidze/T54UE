@@ -32,6 +32,7 @@ public:
         TFunctionRef<void(uint32, UStaticMeshComponent*, const FString&)> Register);
     int32 WheelContacts(uint32 Id) const;
     bool HasVehicleSurface(uint32 Id) const;
+    bool IsAnimatedDoor(uint32 Id) const { return Doors.Contains(Id); }
     TOptional<double> ArticulationError(uint32 Id) const;
     FTransform CorrectPose(uint32 Id, uint32 Parent, const FTransform& Pose) const;
     FTransform DoorDelta(uint32 Id, const FString& Node, const FTransform& Authored, const FTransform& Pose) const;

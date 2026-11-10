@@ -1,13 +1,18 @@
 #include "T5Titles.h"
 
 #include "T5Bridge.h"
+#include "T5UIFont.h"
+#include "T5UIResources.h"
 #include "Engine/Texture2D.h"
 #include "Framework/Application/SlateApplication.h"
-#include "Misc/Compression.h"
 #include "Rendering/DrawElements.h"
 #include "Rendering/SlateRenderer.h"
 #include "Styling/CoreStyle.h"
 #include "UObject/StrongObjectPtr.h"
+
+THIRD_PARTY_INCLUDES_START
+#include "zlib.h"
+THIRD_PARTY_INCLUDES_END
 
 DEFINE_LOG_CATEGORY_STATIC(LogT5Titles, Log, All);
 
@@ -231,9 +236,9 @@ namespace
         return Bits.bValid;
     }
 
-    bool Shape(FBits& Bits, bool bAlpha, FShape& Out)
+    bool RasterizeShape(FBits& Bits, bool bAlpha, FBox2f& Bounds, FT5UIBitmap& Out, int32 MaxExtent = 2048)
     {
-        Out.Bounds = Bits.Rect();
+        Bounds = Bits.Rect();
         TArray<FFill> Fills;
         Fills.AddDefaulted();
         int32 Base = 0;
@@ -327,14 +332,15 @@ namespace
         }
         if (!Bits.bValid || Edges.IsEmpty() || Edges.Num() >= 100000)
             return false;
-        constexpr float Texel = 10.f;
-        Out.Bounds.Min -= FVector2f(Texel);
-        const auto Size = Out.Bounds.GetSize();
+        const float Texel = FMath::Max(10.f, Bounds.GetSize().GetMax() / (MaxExtent - 2));
+        Bounds.Min -= FVector2f(Texel);
+        const auto Size = Bounds.GetSize();
         const int32 W = FMath::CeilToInt(Size.X / Texel) + 1, H = FMath::CeilToInt(Size.Y / Texel) + 1;
         if (W <= 1 || H <= 1 || W > 2048 || H > 2048 || Fills.Num() > 256)
             return false;
-        Out.Bounds.Max = Out.Bounds.Min + FVector2f(W * Texel, H * Texel);
-        TArray<FColor> Pixels;
+        Bounds.Max = Bounds.Min + FVector2f(W * Texel, H * Texel);
+        Out.Size = {W, H};
+        auto& Pixels = Out.Pixels;
         Pixels.Init(FColor::Transparent, W * H);
         struct FCross { float X; int32 Style, Winding; };
         TArray<FCross> Crossings;
@@ -342,7 +348,7 @@ namespace
         Winding.SetNumZeroed(Fills.Num());
         for (int32 Y = 0; Y < H; ++Y)
         {
-            const float Row = Out.Bounds.Min.Y + (Y + .5f) * Texel;
+            const float Row = Bounds.Min.Y + (Y + .5f) * Texel;
             Crossings.Reset();
             for (const auto& E : Edges)
                 if (Fills.IsValidIndex(E.Fill) && Row >= FMath::Min(E.A.Y, E.B.Y) && Row < FMath::Max(E.A.Y, E.B.Y))
@@ -352,7 +358,7 @@ namespace
             int32 Cross = 0;
             for (int32 X = 0; X < W; ++X)
             {
-                const float Column = Out.Bounds.Min.X + (X + .5f) * Texel;
+                const float Column = Bounds.Min.X + (X + .5f) * Texel;
                 while (Crossings.IsValidIndex(Cross) && Crossings[Cross].X <= Column)
                 {
                     const auto& Item = Crossings[Cross++];
@@ -366,8 +372,16 @@ namespace
                     }
             }
         }
-        UTexture2D* Texture = UTexture2D::CreateTransient(W, H, PF_B8G8R8A8, NAME_None,
-            MakeArrayView(reinterpret_cast<const uint8*>(Pixels.GetData()), Pixels.Num() * sizeof(FColor)));
+        return true;
+    }
+
+    bool Shape(FBits& Bits, bool bAlpha, FShape& Out)
+    {
+        FT5UIBitmap Bitmap;
+        if (!RasterizeShape(Bits, bAlpha, Out.Bounds, Bitmap))
+            return false;
+        UTexture2D* Texture = UTexture2D::CreateTransient(Bitmap.Size.X, Bitmap.Size.Y, PF_B8G8R8A8, NAME_None,
+            MakeArrayView(reinterpret_cast<const uint8*>(Bitmap.Pixels.GetData()), Bitmap.Pixels.Num() * sizeof(FColor)));
         if (!Texture)
             return false;
         Texture->SRGB = true;
@@ -375,7 +389,7 @@ namespace
         Texture->UpdateResource();
         Out.Texture.Reset(Texture);
         Out.Brush.SetResourceObject(Texture);
-        Out.Brush.ImageSize = FVector2D(W, H);
+        Out.Brush.ImageSize = FVector2D(Bitmap.Size);
         return true;
     }
 
@@ -419,6 +433,322 @@ namespace
             Item.Name = Bits.String().ToLower();
         return Bits.bValid;
     }
+
+    bool ReadSwf(TConstArrayView<uint8> Swf, TArray<uint8>& Storage, FBits& Body, uint32 MaxBytes = 8 * 1024 * 1024)
+    {
+        if (Swf.Num() < 8 || Swf[1] != 'W' || Swf[2] != 'S')
+            return false;
+        FBits Header{Swf.Slice(4, 4)};
+        const uint32 Length = Header.DWord();
+        if (Length < 8 || Length > MaxBytes)
+            return false;
+        Body = FBits{Swf.Slice(8, Swf.Num() - 8)};
+        if (Swf[0] == 'F')
+            return Length == static_cast<uint32>(Swf.Num());
+        if (Swf[0] != 'C')
+            return false;
+        // The shipped Polish font movie declares its body length instead of the total SWF length.
+        Storage.SetNumUninitialized(Length);
+        uLongf BodyLength = Length;
+        if (uncompress(Storage.GetData(), &BodyLength, Body.Bytes.GetData(), Body.Bytes.Num()) != Z_OK
+            || (BodyLength != Length - 8 && BodyLength != Length))
+            return false;
+        Storage.SetNum(BodyLength, EAllowShrinking::No);
+        Body = FBits{Storage};
+        return true;
+    }
+
+    uint32 ReadTag(FBits& Bits, FBits& Tag)
+    {
+        const uint32 Header = Bits.Word();
+        const uint32 Length = (Header & 63) == 63 ? Bits.DWord() : Header & 63;
+        Tag = FBits{Bits.Payload(Length)};
+        return Header >> 6;
+    }
+
+    int32 FontUnits(int32 Value)
+    {
+        // DefineFont3 stores 20 shape units per unit of its 1024-unit em.
+        return FMath::RoundToInt(Value / 20.0);
+    }
+
+    bool ReadGlyph(FBits Shape, FT5FontGlyph& Glyph)
+    {
+        const int32 FillBits = Shape.Read(4), LineBits = Shape.Read(4);
+        FIntPoint Pen(0, 0);
+        int32 Start = 0;
+        bool bHasStart = false;
+        const auto Close = [&]
+        {
+            if (Glyph.Points.Num() > Start)
+                Glyph.ContourEnds.Add(Glyph.Points.Num() - 1);
+            Start = Glyph.Points.Num();
+            bHasStart = false;
+        };
+        const auto Point = [&](bool bOnCurve)
+        {
+            const int32 X = FontUnits(Pen.X), Y = -FontUnits(Pen.Y);
+            if (FMath::Abs(X) > 8192 || FMath::Abs(Y) > 8192 || Glyph.Points.Num() >= 8192)
+                Shape.bValid = false;
+            else
+                Glyph.Points.Add({int16(X), int16(Y), bOnCurve});
+        };
+        while (Shape.bValid)
+        {
+            if (!Shape.Read(1))
+            {
+                const uint32 Flags = Shape.Read(5);
+                if (!Flags)
+                {
+                    Close();
+                    return Shape.bValid;
+                }
+                if (Flags & 16)
+                    return false;
+                if (Flags & 1)
+                {
+                    Close();
+                    const int32 Width = Shape.Read(5);
+                    Pen.X = Shape.Signed(Width);
+                    Pen.Y = Shape.Signed(Width);
+                }
+                if (Flags & 2) Shape.Read(FillBits);
+                if (Flags & 4) Shape.Read(FillBits);
+                if (Flags & 8) Shape.Read(LineBits);
+                continue;
+            }
+
+            if (!bHasStart)
+            {
+                Point(true);
+                bHasStart = true;
+            }
+            const bool bStraight = Shape.Read(1) != 0;
+            const int32 Width = Shape.Read(4) + 2;
+            if (bStraight)
+            {
+                const bool bGeneral = Shape.Read(1) != 0;
+                const bool bVertical = !bGeneral && Shape.Read(1);
+                if (!bVertical) Pen.X += Shape.Signed(Width);
+                if (bGeneral || bVertical) Pen.Y += Shape.Signed(Width);
+            }
+            else
+            {
+                Pen.X += Shape.Signed(Width);
+                Pen.Y += Shape.Signed(Width);
+                Point(false);
+                Pen.X += Shape.Signed(Width);
+                Pen.Y += Shape.Signed(Width);
+            }
+            Point(true);
+        }
+        return false;
+    }
+
+    bool ReadFont(FBits Tag, uint32 Flags, FT5FontOutline& Font)
+    {
+        const bool bWideOffsets = (Flags & 8) != 0;
+        const bool bWideCodes = (Flags & 4) != 0;
+        const int32 Count = Tag.Word();
+        if (!Tag.bValid || !(Flags & 128) || Count <= 1 || Count > 32768)
+            return false;
+        const int32 Base = Tag.Cursor / 8;
+        TArray<uint32> Offsets;
+        Offsets.Reserve(Count + 1);
+        for (int32 Index = 0; Index <= Count; ++Index)
+            Offsets.Add(bWideOffsets ? Tag.DWord() : Tag.Word());
+        if (!Tag.bValid || Offsets[0] < uint32(Tag.Cursor / 8 - Base)
+            || Offsets.Last() > uint32(Tag.Bytes.Num() - Base))
+            return false;
+        Font.Glyphs.SetNum(Count);
+        Tag.Cursor = (Base + Offsets.Last()) * 8;
+        for (int32 Index = 0; Index < Count; ++Index)
+        {
+            if (Offsets[Index] >= Offsets[Index + 1] || Offsets[Index + 1] > Offsets.Last()
+                || !ReadGlyph(FBits{Tag.Bytes.Slice(Base + Offsets[Index], Offsets[Index + 1] - Offsets[Index])},
+                    Font.Glyphs[Index]))
+                return false;
+            Font.Glyphs[Index].Code = bWideCodes ? Tag.Word() : Tag.Byte();
+        }
+        Font.Ascent = FontUnits(int16(Tag.Word()));
+        Font.Descent = -FMath::Abs(FontUnits(int16(Tag.Word())));
+        Font.Leading = FontUnits(int16(Tag.Word()));
+        for (FT5FontGlyph& Glyph : Font.Glyphs)
+            Glyph.Advance = FMath::Max(0, FontUnits(int16(Tag.Word())));
+        for (int32 Index = 0; Index < Count && Tag.bValid; ++Index)
+            Tag.Rect(); // TrueType bounds are derived from the converted outlines.
+        const uint32 KerningCount = Tag.Word();
+        for (uint32 Index = 0; Index < KerningCount && Tag.bValid; ++Index)
+        {
+            const uint16 Left = bWideCodes ? Tag.Word() : Tag.Byte();
+            const uint16 Right = bWideCodes ? Tag.Word() : Tag.Byte();
+            const int16 Adjustment = FontUnits(int16(Tag.Word()));
+            if (Adjustment)
+                Font.Kerning.Add({Left, Right, Adjustment});
+        }
+        return Tag.bValid;
+    }
+
+    struct FArtSymbol
+    {
+        uint32 Code;
+        FBits Tag;
+    };
+
+    TMap<int32, FPlaced> FirstFrame(const FArtSymbol* Sprite)
+    {
+        TMap<int32, FPlaced> Display;
+        if (!Sprite || Sprite->Code != 39)
+            return Display;
+        FBits Timeline = Sprite->Tag;
+        Timeline.Word(); // Frame count.
+        while (Timeline.bValid)
+        {
+            FBits Tag;
+            const uint32 Code = ReadTag(Timeline, Tag);
+            if (Timeline.bValid && Code == 1)
+                return Display;
+            if (!Code || ((Code == 26 || Code == 70) && !Place(Tag, Code == 70, 0, Display)))
+                break;
+            if (Code == 28)
+                Display.Remove(Tag.Word());
+        }
+        return {};
+    }
+
+    const FArtSymbol* FindVector(const TMap<int32, FArtSymbol>& Symbols, int32 Id, int32 Depth = 0)
+    {
+        const FArtSymbol* Symbol = Symbols.Find(Id);
+        if (!Symbol || Depth >= 8)
+            return nullptr;
+        if (Symbol->Code != 39)
+            return Symbol;
+        auto Frame = FirstFrame(Symbol);
+        Frame.KeySort(TLess<int32>());
+        for (const auto& [Layer, Item] : Frame)
+            if (const FArtSymbol* Child = FindVector(Symbols, Item.Character, Depth + 1))
+                return Child;
+        return nullptr;
+    }
+}
+
+void ImportT5UIFonts(TConstArrayView<uint8> Swf, FT5UIFontSet& Fonts)
+{
+    TSet<FName> Needed;
+    for (const auto& [Role, Face] : Fonts.Roles)
+        if (!Fonts.Faces.Contains(Face))
+            Needed.Add(Face);
+    TArray<uint8> Storage;
+    FBits Body;
+    if (Needed.IsEmpty() || !ReadSwf(Swf, Storage, Body, 32 * 1024 * 1024))
+        return;
+    Body.Rect();
+    Body.DWord(); // Frame rate and frame count.
+    while (Body.bValid && !Needed.IsEmpty())
+    {
+        FBits Tag;
+        const uint32 Code = ReadTag(Body, Tag);
+        if (!Code)
+            break;
+        if (Code != 75)
+            continue;
+        Tag.Word(); // Character ID.
+        const uint32 Flags = Tag.Byte();
+        Tag.Byte(); // Language code.
+        const auto Name = Tag.Payload(Tag.Byte());
+        if (!Tag.bValid || Name.IsEmpty())
+            continue;
+        FT5FontOutline Font;
+        Font.Style = Flags & 3;
+        for (const uint8 Byte : Name)
+            if (Byte)
+                Font.Name.AppendChar(Byte);
+        const FName Key = T5FontKey(Font.Name, Font.Style);
+        if (Needed.Contains(Key) && ReadFont(Tag, Flags, Font))
+        {
+            auto Data = MakeT5TrueType(Font);
+            if (!Data.IsEmpty())
+            {
+                Fonts.Faces.Add(Key, MoveTemp(Data));
+                Needed.Remove(Key);
+            }
+        }
+    }
+}
+
+TMap<FName, FT5UIBitmap> ImportT5UIArt(TConstArrayView<uint8> Swf, const TCHAR* Source, TConstArrayView<FT5UIArtSpec> Specs)
+{
+    TArray<uint8> Storage;
+    FBits Body;
+    if (!ReadSwf(Swf, Storage, Body))
+        return {};
+    Body.Rect();
+    Body.Word(); // Frame rate.
+    Body.Word(); // Frame count.
+    TMap<int32, FArtSymbol> Symbols;
+    TMap<FString, int32> Exports;
+    while (Body.bValid)
+    {
+        FBits Tag;
+        const uint32 Code = ReadTag(Body, Tag);
+        if (!Code)
+            break;
+        if (Code == 2 || Code == 22 || Code == 32 || Code == 39)
+        {
+            const int32 Id = Tag.Word();
+            if (!Tag.bValid)
+                return {};
+            Symbols.Add(Id, {Code, Tag});
+        }
+        if (Code == 56)
+        {
+            const int32 Count = Tag.Word();
+            for (int32 Index = 0; Index < Count && Tag.bValid; ++Index)
+            {
+                const int32 Id = Tag.Word();
+                Exports.Add(Tag.String().ToLower(), Id);
+            }
+            if (!Tag.bValid)
+                return {};
+        }
+    }
+    if (!Body.bValid)
+        return {};
+
+    const auto Child = [&](int32 Id, const FString& Name)
+    {
+        auto Frame = FirstFrame(Symbols.Find(Id));
+        if (Name.StartsWith(TEXT("#")))
+            if (const auto* Item = Frame.Find(FCString::Atoi(*Name + 1)))
+                return Item->Character;
+        for (const auto& [Depth, Item] : Frame)
+            if (Item.Name == Name)
+                return Item.Character;
+        return 0;
+    };
+    TMap<FName, FT5UIBitmap> Result;
+    for (const auto& [Name, Path] : Specs)
+    {
+        TArray<FString> Parts;
+        FString(Path).ToLower().ParseIntoArray(Parts, TEXT("/"));
+        int32 Id = Exports.FindRef(Parts[0]);
+        for (int32 Index = 1; Id && Index < Parts.Num(); ++Index)
+            Id = Child(Id, Parts[Index]);
+        const FArtSymbol* Symbol = FindVector(Symbols, Id);
+        if (!Symbol)
+            continue;
+        FT5UIBitmap Bitmap;
+        FBox2f Bounds;
+        FBits Tag = Symbol->Tag;
+        if (RasterizeShape(Tag, Symbol->Code == 32, Bounds, Bitmap, 768)
+            && Bitmap.Pixels.ContainsByPredicate([](FColor Pixel) { return Pixel.A > 0; }))
+        {
+            Bitmap.Source = Source;
+            Bitmap.Symbol = Path;
+            Result.Add(Name, MoveTemp(Bitmap));
+        }
+    }
+    return Result;
 }
 
 struct FT5TitleMovie
@@ -481,23 +811,9 @@ struct FT5TitleMovie
 
     bool Load(TConstArrayView<uint8> Swf)
     {
-        if (Swf.Num() < 8 || Swf[1] != 'W' || Swf[2] != 'S')
-            return false;
-        FBits Header{Swf.Slice(4, 4)};
-        const uint32 Length = Header.DWord();
-        if (Length < 8 || Length > 8 * 1024 * 1024)
-            return false;
         TArray<uint8> Decompressed;
-        FBits Body{Swf.Slice(8, Swf.Num() - 8)};
-        if (Swf[0] == 'C')
-        {
-            Decompressed.SetNumUninitialized(Length - 8);
-            if (!FCompression::UncompressMemory(NAME_Zlib, Decompressed.GetData(), Decompressed.Num(),
-                    Body.Bytes.GetData(), Body.Bytes.Num()))
-                return false;
-            Body.Bytes = Decompressed;
-        }
-        else if (Swf[0] != 'F' || Length != static_cast<uint32>(Swf.Num()))
+        FBits Body;
+        if (!ReadSwf(Swf, Decompressed, Body))
             return false;
         Stage = Body.Rect();
         FPS = Body.Word() / 256.f;

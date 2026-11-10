@@ -123,6 +123,7 @@ private:
     friend class FT5AudioSmoke;
     friend class FT5FaceRuntimeSmoke;
     friend class FT5LoadingSmoke;
+    friend class FT5UISmoke;
     bool ResolvePaths(FString& Data, FString& Plugins, FString& Bridge) const;
     void RequestCatalog(TFunction<void(bool)> OnReady);
     void CloseMapBrowser();
@@ -208,7 +209,7 @@ private:
     TMap<uint32, FFaceState> Faces;
     USkeletalMeshComponent* FindReferenceSkeleton(uint32 Id) const;
     bool PlayLocomotion(USkeletalMeshComponent& Mesh, const FString& Project, const FString& Gait,
-        TOptional<float> ResumeAt, FString& Error);
+        float PlaybackSpeed, TOptional<float> ResumeAt, FString& Error);
 
     struct FReferenceVisual
     {
@@ -243,6 +244,9 @@ private:
     TSharedPtr<class FT5Archery> RuntimeArchery;
     TSharedPtr<class ST5Titles> Titles;
     TSharedPtr<class ST5Compass> Compass;
+    TSharedPtr<class FT5UIResources> UIResources;
+    bool bCompassVisible = false;
+    double NextPoolRefresh = 0;
     TMap<FString, TSharedPtr<struct FT5ArcheryAsset>> ArcheryAssets;
     TSharedPtr<SWidget> PapyrusErrors;
     TMap<uint32, TArray<FReferenceVisual>> ReferenceVisuals;

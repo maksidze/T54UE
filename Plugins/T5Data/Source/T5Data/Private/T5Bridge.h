@@ -88,6 +88,8 @@ public:
     FString DialogueState() const;
     void DialogueAction(ET5DialogueAction Action, uint32 Choice = 0);
     bool Inventory(uint32 Owner, TArray<TSharedPtr<FJsonValue>>& Entries) const;
+    TUniquePtr<FT5LoadResult> InventoryModel(uint32 Item) const;
+    FVector3f ResourcePoolRatios() const;
     bool InventoryAction(uint32 Owner, uint32 Item, int32 Count);
     int32 PlayerWeapon(int32 Action, uint32 Target = 0, float* Reach = nullptr);
     bool FirePlayerBow(const FVector& Origin, const FVector& Direction);

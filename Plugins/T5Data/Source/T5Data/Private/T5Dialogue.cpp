@@ -1,5 +1,6 @@
 #include "T5Scene.h"
 #include "T5Bridge.h"
+#include "T5MenuStyle.h"
 #include "Dom/JsonObject.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/World.h"
@@ -9,8 +10,10 @@
 #include "Serialization/JsonSerializer.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Images/SImage.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SConstraintCanvas.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SCompoundWidget.h"
@@ -21,67 +24,84 @@ class ST5Dialogue final : public SCompoundWidget
 public:
     SLATE_BEGIN_ARGS(ST5Dialogue) {}
         SLATE_ARGUMENT(AT5Scene*, Scene)
+        SLATE_ARGUMENT(TSharedPtr<FT5UIResources>, Resources)
     SLATE_END_ARGS()
 
     void Construct(const FArguments& Args)
     {
         Scene = Args._Scene;
-        ChildSlot.HAlign(HAlign_Right).VAlign(VAlign_Bottom).Padding(24, 24, 48, 56)
+        Resources = Args._Resources;
+        const auto SpeechPanel = T5MenuArt(Resources, TEXT("DialoguePanel"));
+        const auto TradePanel = T5MenuArt(Resources, TEXT("ItemListPanel"));
+        const auto ShowSpeaker = [this] { return Trade || SpeakerName.IsEmpty() ? EVisibility::Collapsed : EVisibility::HitTestInvisible; };
+        ChildSlot
         [
-            SNew(SBorder).Padding(22).BorderImage(FCoreStyle::Get().GetBrush(TEXT("WhiteBrush")))
-            .BorderBackgroundColor(FLinearColor(.025f, .032f, .043f, .96f))
+            SNew(SConstraintCanvas)
+            + SConstraintCanvas::Slot().Anchors(FAnchors(.38f, .45f, .565f, .55f)).Offset(FMargin(0))
             [
-                SNew(SBox).WidthOverride(550)
+                SNew(SBox).HAlign(HAlign_Right).VAlign(VAlign_Center).Visibility_Lambda(ShowSpeaker)
+                [SNew(STextBlock).Text_Lambda([this] { return SpeakerName; }).Font(T5MenuFont(Resources, 25, TEXT("Dialogue")))
+                    .ShadowOffset(FVector2D(1.5, 1.5)).ShadowColorAndOpacity(FLinearColor::Black)]
+            ]
+            + SConstraintCanvas::Slot().Anchors_Lambda([this]
+                {
+                    return Trade ? FAnchors(.024f, .10f, .35f, .86f) : FAnchors(.582f, .27f, .92f, .73f);
+                }).Offset(FMargin(0))
+            [
+                SNew(SBorder).Padding(FMargin(15, 15, 23, 15)).VAlign(VAlign_Center)
+                .BorderImage_Lambda([this, SpeechPanel, TradePanel] { return Trade ? TradePanel.Get() : SpeechPanel.Get(); })
                 [
                     SNew(SVerticalBox)
-                    + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 12)
-                    [
-                        SAssignNew(Name, STextBlock)
-                        .Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 21))
-                        .ColorAndOpacity(FLinearColor(.95f, .82f, .60f))
-                    ]
-                    + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 12)
-                    [
-                        SAssignNew(Line, STextBlock).WrapTextAt(550)
-                        .Font(FCoreStyle::GetDefaultFontStyle(TEXT("Regular"), 15))
-                    ]
                     + SVerticalBox::Slot().AutoHeight()
                     [
-                        SNew(SVerticalBox).Visibility_Lambda([this] {
-                            return Trade ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed;
-                        })
-                        + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 9)
-                        [SAssignNew(Balance, STextBlock).ColorAndOpacity(FLinearColor(.95f, .82f, .60f))]
-                        + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+                        SNew(SVerticalBox).Visibility_Lambda([this] { return Trade ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed; })
+                        + SVerticalBox::Slot().AutoHeight().Padding(12, 0, 0, 14)
+                        [SNew(STextBlock).Text_Lambda([this] { return SpeakerName; }).Font(T5MenuFont(Resources, 29))]
+                        + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 10)
+                        [T5MenuBar(Resources, TEXT("ItemBottom"), SAssignNew(Balance, STextBlock).Font(T5MenuFont(Resources, 17)))]
+                        + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 12)
                         [
                             SNew(SHorizontalBox)
-                            + SHorizontalBox::Slot().FillWidth(1).Padding(0, 0, 4, 0)
+                            + SHorizontalBox::Slot().FillWidth(1)
                             [
-                                SNew(SButton).IsFocusable(false).HAlign(HAlign_Center)
-                                .Text(NSLOCTEXT("T5Trade", "Buy", "Купить"))
-                                .ButtonColorAndOpacity_Lambda([this] { return TabColor(!bSelling); })
+                                SNew(SButton).ButtonStyle(T5MenuButtonStyle()).IsFocusable(false).HAlign(HAlign_Center)
                                 .OnClicked_Lambda([this] { return SelectTradeTab(false); })
+                                [SNew(STextBlock).Text(NSLOCTEXT("T5Trade", "Buy", "КУПИТЬ")).Font(T5MenuFont(Resources, 22, TEXT("Dialogue")))
+                                    .ColorAndOpacity_Lambda([this] { return FSlateColor(TabColor(!bSelling)); })]
                             ]
-                            + SHorizontalBox::Slot().FillWidth(1).Padding(4, 0, 0, 0)
+                            + SHorizontalBox::Slot().FillWidth(1)
                             [
-                                SNew(SButton).IsFocusable(false).HAlign(HAlign_Center)
-                                .Text(NSLOCTEXT("T5Trade", "Sell", "Продать"))
-                                .ButtonColorAndOpacity_Lambda([this] { return TabColor(bSelling); })
+                                SNew(SButton).ButtonStyle(T5MenuButtonStyle()).IsFocusable(false).HAlign(HAlign_Center)
                                 .OnClicked_Lambda([this] { return SelectTradeTab(true); })
+                                [SNew(STextBlock).Text(NSLOCTEXT("T5Trade", "Sell", "ПРОДАТЬ")).Font(T5MenuFont(Resources, 22, TEXT("Dialogue")))
+                                    .ColorAndOpacity_Lambda([this] { return FSlateColor(TabColor(bSelling)); })]
                             ]
                         ]
                     ]
                     + SVerticalBox::Slot().AutoHeight()
-                    [SNew(SBox).MaxDesiredHeight(290)[SAssignNew(Choices, SScrollBox)]]
+                    [SNew(SBox).MaxDesiredHeight(340)[SAssignNew(Choices, SScrollBox)]]
                     + SVerticalBox::Slot().AutoHeight().Padding(0, 8, 0, 0)
-                    [SAssignNew(TradeMessage, STextBlock).ColorAndOpacity(FLinearColor(.95f, .82f, .60f))]
-                    + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0, 12, 0, 0)
+                    [SAssignNew(TradeMessage, STextBlock).Font(T5MenuFont(Resources, 18))]
+                ]
+            ]
+            + SConstraintCanvas::Slot().Anchors(FAnchors(.19f, .79f, .81f, .90f)).Offset(FMargin(0))
+            [
+                SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
+                [
+                    SAssignNew(Line, STextBlock).AutoWrapText(true).Justification(ETextJustify::Center)
+                    .Font(T5MenuFont(Resources, 24, TEXT("Dialogue"))).ShadowOffset(FVector2D(1.5, 2)).ShadowColorAndOpacity(FLinearColor::Black)
+                ]
+            ]
+            + SConstraintCanvas::Slot().Anchors(FAnchors(.68f, .91f, .97f, .98f)).Offset(FMargin(0))
+            [
+                SNew(SBox).HAlign(HAlign_Right).VAlign(VAlign_Center)
+                [
+                    SNew(SButton).ButtonStyle(T5MenuButtonStyle()).IsFocusable(false).OnClicked(this, &ST5Dialogue::Close)
                     [
-                        SNew(SButton).IsFocusable(false).Text_Lambda([this] {
-                            return Trade ? NSLOCTEXT("T5Trade", "Back", "Назад к разговору (Esc)")
-                                : NSLOCTEXT("T5Dialogue", "Close", "Закончить разговор (Esc)");
+                        SNew(STextBlock).Font(T5MenuFont(Resources, 19, TEXT("Dialogue"))).ShadowOffset(FVector2D(1, 1)).ShadowColorAndOpacity(FLinearColor::Black)
+                        .Text_Lambda([this] {
+                            return FText::FromString(Trade ? TEXT("[Esc]  К разговору") : TEXT("[Esc]  Выйти"));
                         })
-                        .OnClicked(this, &ST5Dialogue::Close)
                     ]
                 ]
             ]
@@ -100,7 +120,7 @@ public:
         Actor = Speaker;
         LastState = MoveTemp(State);
 
-        Name->SetText(FText::FromString(Data->GetStringField(TEXT("name"))));
+        SpeakerName = FText::FromString(Data->GetStringField(TEXT("name")));
         const bool bWasTrading = Trade.IsValid();
         Trade = Data->HasTypedField<EJson::Object>(TEXT("trade")) ? Data->GetObjectField(TEXT("trade")) : nullptr;
         if (Trade)
@@ -170,12 +190,27 @@ private:
         TSharedPtr<SButton> Row;
         Choices->AddSlot().Padding(0, 2)
         [
-            SAssignNew(Row, SButton).IsFocusable(false).ContentPadding(FMargin(12, 7))
+            SAssignNew(Row, SButton).ButtonStyle(T5MenuButtonStyle()).IsFocusable(false).ContentPadding(FMargin(2, 4)).HAlign(HAlign_Fill)
             .ButtonColorAndOpacity_Lambda([this, Index] { return TabColor(Index == Selected); })
+            .OnHovered_Lambda([this, Index] { Selected = Index; })
             .OnClicked_Lambda([this, Id] { return Choose(Id); })
             [
-                SNew(STextBlock).Text(FText::FromString(Label)).WrapTextAt(500)
-                .Font(FCoreStyle::GetDefaultFontStyle(TEXT("Regular"), 13))
+                SNew(SHorizontalBox)
+                + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+                [
+                    SNew(SBox).WidthOverride(16).HeightOverride(16)
+                    [SNew(SImage).Image(T5MenuArt(Resources, TEXT("DialogueNext"), false))
+                        .Visibility_Lambda([this, Index] { return Selected == Index ? EVisibility::HitTestInvisible : EVisibility::Hidden; })
+                        .RenderTransform(FSlateRenderTransform(FQuat2D(-UE_HALF_PI))).RenderTransformPivot(FVector2D(.5, .5))]
+                ]
+                + SHorizontalBox::Slot().FillWidth(1)
+                [
+                    SNew(STextBlock).Text(FText::FromString(Label)).AutoWrapText(true).Font(T5MenuFont(Resources, 22, TEXT("Dialogue")))
+                        .ShadowOffset(FVector2D(1, 1.5)).ShadowColorAndOpacity(FLinearColor::Black)
+                        .ColorAndOpacity_Lambda([this, Index] {
+                            return FSlateColor(Index == Selected ? FLinearColor::White : FLinearColor(.72f, .72f, .72f));
+                        })
+                ]
             ]
         ];
         ChoiceRows.Add(Row);
@@ -201,7 +236,8 @@ private:
         if (ChoiceIds.IsEmpty())
         {
             Choices->AddSlot().Padding(8)
-            [SNew(STextBlock).Text(NSLOCTEXT("T5Trade", "Empty", "Нет подходящих товаров"))];
+            [SNew(STextBlock).Text(NSLOCTEXT("T5Trade", "Empty", "Нет подходящих товаров"))
+                .Font(T5MenuFont(Resources, 19, TEXT("Dialogue")))];
             Choices->ScrollToStart();
         }
         else if (bKeepPosition)
@@ -247,7 +283,9 @@ private:
     }
 
     TWeakObjectPtr<AT5Scene> Scene;
-    TSharedPtr<STextBlock> Name, Line, Balance, TradeMessage;
+    FText SpeakerName;
+    TSharedPtr<FT5UIResources> Resources;
+    TSharedPtr<STextBlock> Line, Balance, TradeMessage;
     TSharedPtr<FJsonObject> Trade;
     bool bSelling = false;
     TSharedPtr<SScrollBox> Choices;
@@ -257,6 +295,26 @@ private:
     uint32 Actor = 0;
     int32 Selected = 0;
 };
+
+#if WITH_DEV_AUTOMATION_TESTS
+TSharedRef<SWidget> MakeT5DialogueReview(const TSharedPtr<FT5UIResources>& Resources, bool bTrade)
+{
+    auto Menu = SNew(ST5Dialogue).Scene(nullptr).Resources(Resources).Visibility(EVisibility::HitTestInvisible);
+    if (bTrade)
+    {
+        Menu->Update(TEXT(R"({"actor":1,"name":"Лукан Валерий","trade":{
+            "playerGold":125,"vendorGold":750,"message":"","buy":[
+            [1,"Зелье лечения",3,34],[2,"Стальная стрела",12,3],[3,"Железный меч",1,76]],
+            "sell":[]}})"));
+    }
+    else
+    {
+        Menu->Update(TEXT(R"({"actor":1,"name":"Лукан Валерий","line":"Добро пожаловать в «Ривервудского торговца».",
+            "choices":[[1,"Что у тебя есть на продажу?"],[2,"Что случилось?"]]})"));
+    }
+    return Menu;
+}
+#endif
 
 void AT5Scene::OpenDialogue(uint32 Actor)
 {
@@ -271,7 +329,7 @@ void AT5Scene::OpenDialogue(uint32 Actor)
         return;
     }
 
-    auto Menu = SNew(ST5Dialogue).Scene(this);
+    auto Menu = SNew(ST5Dialogue).Scene(this).Resources(UIResources);
     if (!Menu->Update(Papyrus->DialogueState(), Actor))
     {
         Papyrus->DialogueAction(ET5DialogueAction::Close);

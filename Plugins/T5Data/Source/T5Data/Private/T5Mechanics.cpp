@@ -452,6 +452,8 @@ void FT5Mechanics::LoadCollisions(AActor& Owner, const FJsonObject& Manifest,
                 Setup->DefaultInstance.AngularDamping = Row[3]->AsNumber();
                 Setup->DefaultInstance.SetPositionSolverIterationCount(12);
                 Setup->DefaultInstance.SetVelocitySolverIterationCount(4);
+                // Animation can leave a limb touching the floor when its body is created.
+                Setup->DefaultInstance.SetMaxDepenetrationVelocity(30.f);
                 if (Row.IsValidIndex(5))
                 {
                     auto* Material = NewObject<UPhysicalMaterial>(Setup);
@@ -592,9 +594,12 @@ bool FT5Mechanics::StartRagdoll(uint32 Id, USkeletalMeshComponent& Mesh, const T
             }
         }
     }
-    if (!Local.IsEmpty())
+    if (Local.IsEmpty()) Local = Mesh.GetBoneSpaceTransforms();
+    if (Local.Num() == Skeleton.GetNum())
     {
-        Mesh.SetAnimInstanceClass(UT5HkxAnimInstance::StaticClass());
+        // Keep the last animated pose as the basis for physics and for bones with no body.
+        if (!Cast<UT5HkxAnimInstance>(Mesh.GetAnimInstance()))
+            Mesh.SetAnimInstanceClass(UT5HkxAnimInstance::StaticClass());
         if (auto* Anim = Cast<UT5HkxAnimInstance>(Mesh.GetAnimInstance())) Anim->SetFixedPose(MoveTemp(Local));
         Mesh.TickAnimation(0, false);
         Mesh.RefreshBoneTransforms();
@@ -606,6 +611,8 @@ bool FT5Mechanics::StartRagdoll(uint32 Id, USkeletalMeshComponent& Mesh, const T
     Mesh.SetPhysicsAsset(Rig.Asset.Get(), true);
     Mesh.SetAllBodiesSimulatePhysics(true);
     Mesh.SetPhysicsBlendWeight(1);
+    Mesh.SetAllPhysicsLinearVelocity(FVector::ZeroVector);
+    Mesh.SetAllPhysicsAngularVelocityInRadians(FVector::ZeroVector);
     if (bAuthored || bRetained) Mesh.PutAllRigidBodiesToSleep();
     UE_LOG(LogT5Mechanics, Display, TEXT("T5_RAGDOLL ref=%08X bodies=%d joints=%d authored=%d retained=%d"), Id,
         Rig.Bones.Num(), Rig.Asset->ConstraintSetup.Num(), bAuthored, bRetained);

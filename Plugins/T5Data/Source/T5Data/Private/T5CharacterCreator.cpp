@@ -3,6 +3,7 @@
 #include "T5Bridge.h"
 #include "T5Mechanics.h"
 #include "T5Titles.h"
+#include "T5MenuStyle.h"
 #include "Async/Async.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
@@ -49,34 +50,36 @@ namespace
         auto Bytes = Data.Read(Path); if (Bytes.IsEmpty()) return {};
         FUTF8ToTCHAR Text(reinterpret_cast<const ANSICHAR*>(Bytes.GetData()), Bytes.Num()); return FString(Text.Length(), Text.Get());
     }
-    TSharedRef<SWidget> Label(const FString& Text, int Size = 13)
+    TSharedRef<SWidget> Label(const TSharedPtr<FT5UIResources>& Resources, const FString& Text, int Size = 14)
     {
-        return SNew(STextBlock).Text(FText::FromString(Text)).Font(FCoreStyle::GetDefaultFontStyle(TEXT("Regular"), Size))
+        return SNew(STextBlock).Text(FText::FromString(Text)).Font(T5MenuFont(Resources, Size, TEXT("Regular")))
             .ColorAndOpacity(FLinearColor(.86f,.84f,.78f));
     }
-    TSharedRef<SWidget> Button(const FString& Text, TFunction<void()> Action)
+    TSharedRef<SWidget> Button(const TSharedPtr<FT5UIResources>& Resources, const FString& Text, TFunction<void()> Action)
     {
-        return SNew(SButton).ContentPadding(FMargin(10,6)).OnClicked_Lambda([Action] { Action(); return FReply::Handled(); })[Label(Text)];
+        return SNew(SButton).ButtonStyle(T5MenuButtonStyle()).ContentPadding(FMargin(10,6))
+            .OnClicked_Lambda([Action] { Action(); return FReply::Handled(); })[Label(Resources, Text)];
     }
-    TSharedRef<SWidget> Cycle(const FString& Title, TFunction<FString()> Value, TFunction<void(int)> Change)
+    TSharedRef<SWidget> Cycle(const TSharedPtr<FT5UIResources>& Resources, const FString& Title, TFunction<FString()> Value, TFunction<void(int)> Change)
     {
         return SNew(SVerticalBox)
-            + SVerticalBox::Slot().AutoHeight().Padding(0,6,0,3)[Label(Title,11)]
+            + SVerticalBox::Slot().AutoHeight().Padding(0,6,0,3)[Label(Resources, Title,11)]
             + SVerticalBox::Slot().AutoHeight()
             [SNew(SHorizontalBox)
-                + SHorizontalBox::Slot().AutoWidth()[Button(TEXT("‹"), [Change] { Change(-1); })]
+                + SHorizontalBox::Slot().AutoWidth()[Button(Resources, TEXT("‹"), [Change] { Change(-1); })]
                 + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center).Padding(8,0)
-                [SNew(STextBlock).Text_Lambda([Value] { return FText::FromString(Value()); }).AutoWrapText(true)]
-                + SHorizontalBox::Slot().AutoWidth()[Button(TEXT("›"), [Change] { Change(1); })]];
+                [SNew(STextBlock).Text_Lambda([Value] { return FText::FromString(Value()); }).AutoWrapText(true).Font(T5MenuFont(Resources, 14, TEXT("Regular")))]
+                + SHorizontalBox::Slot().AutoWidth()[Button(Resources, TEXT("›"), [Change] { Change(1); })]];
     }
-    TSharedRef<SWidget> Slider(const FString& Title, float Min, float Max, TFunction<float()> Get, TFunction<void(float)> Set)
+    TSharedRef<SWidget> Slider(const TSharedPtr<FT5UIResources>& Resources, const FSliderStyle* Style, const FString& Title, float Min, float Max,
+        TFunction<float()> Get, TFunction<void(float)> Set)
     {
         return SNew(SVerticalBox)
             + SVerticalBox::Slot().AutoHeight().Padding(0,7,0,3)
-            [SNew(STextBlock).Text_Lambda([Title, Get] { return FText::FromString(FString::Printf(TEXT("%s   %.2f"), *Title, Get())); })]
+            [SNew(STextBlock).Text_Lambda([Title, Get] { return FText::FromString(FString::Printf(TEXT("%s   %.2f"), *Title, Get())); }).Font(T5MenuFont(Resources, 14, TEXT("Regular")))]
             + SVerticalBox::Slot().AutoHeight().Padding(0,3)
-            [SNew(SSlider).MinValue(Min).MaxValue(Max).Value_Lambda([Get] { return Get(); })
-                .SliderHandleColor(FLinearColor(.81f,.66f,.39f)).OnValueChanged_Lambda([Set](float Value) { Set(Value); })];
+            [SNew(SSlider).Style(Style).MinValue(Min).MaxValue(Max).Value_Lambda([Get] { return Get(); })
+                .OnValueChanged_Lambda([Set](float Value) { Set(Value); })];
     }
     FString RaceName(const FString& Id)
     {
@@ -452,14 +455,18 @@ void FT5CharacterCreator::Zoom(float Amount) { Distance = FMath::Clamp(Distance 
 void FT5CharacterCreator::RefreshMorphList()
 {
     if (!MorphList) return; MorphList->ClearChildren();
+    auto* Scene = Owner.Get();
+    const auto Resources = Scene ? Scene->UIResources : nullptr;
+    const auto* Style = Resources ? Resources->GetRaceSliderStyle()
+        : &FCoreStyle::Get().GetWidgetStyle<FSliderStyle>(TEXT("Slider"));
     for (auto Key : AvailableMorphs)
     {
         const FString Text = Key.ToString().RightChop(8);
         if (!Query.IsEmpty() && !Text.Contains(Query)) continue;
         MorphList->AddSlot().AutoHeight().Padding(0,0,0,5)
-            [Slider(Text,-1,1,[this,Key] { return MorphValue(Key); },[this,Key](float V) { Morphs.Add(Key,V); ApplyMorphs(); })];
+            [Slider(Resources, Style,Text,-1,1,[this,Key] { return MorphValue(Key); },[this,Key](float V) { Morphs.Add(Key,V); ApplyMorphs(); })];
     }
-    if (AvailableMorphs.IsEmpty()) MorphList->AddSlot().AutoHeight()[Label(TEXT("Для выбранной головы нет доступных TRI-морфов."))];
+    if (AvailableMorphs.IsEmpty()) MorphList->AddSlot().AutoHeight()[Label(Resources, TEXT("Для выбранной головы нет доступных TRI-морфов."))];
 }
 
 void FT5CharacterCreator::SavePreset()
@@ -499,52 +506,59 @@ void FT5CharacterCreator::LoadPreset()
 
 TSharedRef<SWidget> FT5CharacterCreator::MakePanel()
 {
+    auto* Scene = Owner.Get();
+    const auto Resources = Scene ? Scene->UIResources : nullptr;
+    const auto* Style = Resources ? Resources->GetRaceSliderStyle()
+        : &FCoreStyle::Get().GetWidgetStyle<FSliderStyle>(TEXT("Slider"));
     auto Left = SNew(SVerticalBox);
-    Left->AddSlot().AutoHeight()[Label(TEXT("ПЕРСОНАЖ"),18)];
+    Left->AddSlot().AutoHeight()[Label(Resources, TEXT("ПЕРСОНАЖ"),18)];
     Left->AddSlot().AutoHeight().Padding(0,10)[SNew(SEditableTextBox).Text_Lambda([this] { return FText::FromString(Name); })
+        .Font(T5MenuFont(Resources, 14, TEXT("Regular")))
         .HintText(FText::FromString(TEXT("Имя персонажа"))).OnTextChanged_Lambda([this](const FText& Text) { Name=Text.ToString().Left(64); })];
-    Left->AddSlot().AutoHeight()[Cycle(TEXT("Раса"),[this] { return RaceLabel(); },[this](int D) { CycleRace(D); })];
-    Left->AddSlot().AutoHeight()[Cycle(TEXT("Пол"),[this] { return Choice.Female ? TEXT("Женский") : TEXT("Мужской"); },[this](int) {
+    Left->AddSlot().AutoHeight()[Cycle(Resources, TEXT("Раса"),[this] { return RaceLabel(); },[this](int D) { CycleRace(D); })];
+    Left->AddSlot().AutoHeight()[Cycle(Resources, TEXT("Пол"),[this] { return Choice.Female ? TEXT("Женский") : TEXT("Мужской"); },[this](int) {
         Choice.Female = !Choice.Female; Choice.Preset=0; FMemory::Memzero(Choice.Parts); Morphs.Reset(); Changed(); })];
-    Left->AddSlot().AutoHeight()[Cycle(TEXT("Набор частей головы"),[this] { return Choice.Preset ? FString::Printf(TEXT("%d / %d"),Presets().IndexOfByKey(Choice.Preset)+1,Presets().Num()) : TEXT("По умолчанию"); },[this](int D) { CyclePreset(D); })];
+    Left->AddSlot().AutoHeight()[Cycle(Resources, TEXT("Набор частей головы"),[this] { return Choice.Preset ? FString::Printf(TEXT("%d / %d"),Presets().IndexOfByKey(Choice.Preset)+1,Presets().Num()) : TEXT("По умолчанию"); },[this](int D) { CyclePreset(D); })];
     const TPair<int,FString> Types[] = {{1,TEXT("Голова")},{2,TEXT("Глаза")},{3,TEXT("Волосы")},{4,TEXT("Борода")},{6,TEXT("Брови")}};
-    for (auto Type : Types) Left->AddSlot().AutoHeight()[Cycle(Type.Value,[this,Type] { return PartLabel(Type.Key); },[this,Type](int D) { CyclePart(Type.Key,D); })];
-    Left->AddSlot().AutoHeight()[Slider(TEXT("Вес"),0,100,[this] { return Choice.Weight; },[this](float V) { Choice.Weight=V; Changed(); })];
-    Left->AddSlot().AutoHeight()[Slider(TEXT("Рост"),.8f,1.2f,[this] { return Choice.Height; },[this](float V) { Choice.Height=V; Changed(); })];
+    for (auto Type : Types) Left->AddSlot().AutoHeight()[Cycle(Resources, Type.Value,[this,Type] { return PartLabel(Type.Key); },[this,Type](int D) { CyclePart(Type.Key,D); })];
+    Left->AddSlot().AutoHeight()[Slider(Resources, Style,TEXT("Вес"),0,100,[this] { return Choice.Weight; },[this](float V) { Choice.Weight=V; Changed(); })];
+    Left->AddSlot().AutoHeight()[Slider(Resources, Style,TEXT("Рост"),.8f,1.2f,[this] { return Choice.Height; },[this](float V) { Choice.Height=V; Changed(); })];
     const TCHAR* Channels[] = {TEXT("Кожа · красный"),TEXT("Кожа · зелёный"),TEXT("Кожа · синий")};
-    for (int I=0;I<3;++I) Left->AddSlot().AutoHeight()[Slider(Channels[I],0,1,[this,I] { return Choice.Skin[I]; },[this,I](float V) { Choice.Skin[I]=V; Changed(); })];
+    for (int I=0;I<3;++I) Left->AddSlot().AutoHeight()[Slider(Resources, Style,Channels[I],0,1,[this,I] { return Choice.Skin[I]; },[this,I](float V) { Choice.Skin[I]=V; Changed(); })];
     auto Right = SNew(SVerticalBox)
-        + SVerticalBox::Slot().AutoHeight()[Label(TEXT("МОРФЫ ЛИЦА"),18)]
+        + SVerticalBox::Slot().AutoHeight()[Label(Resources, TEXT("МОРФЫ ЛИЦА"),18)]
         + SVerticalBox::Slot().AutoHeight().Padding(0,10)[SNew(SSearchBox).HintText(FText::FromString(TEXT("Поиск морфа")))
             .OnTextChanged_Lambda([this](const FText& Text) { Query=Text.ToString(); RefreshMorphList(); })]
         + SVerticalBox::Slot().FillHeight(1)[SNew(SScrollBox)+SScrollBox::Slot()[SAssignNew(MorphList,SVerticalBox)]]
-        + SVerticalBox::Slot().AutoHeight().Padding(0,8)[Button(TEXT("Сбросить морфы"),[this] { Morphs.Reset(); ApplyMorphs(); })]
-        + SVerticalBox::Slot().AutoHeight()[Button(TEXT("Сохранить пресет"),[this] { SavePreset(); })]
-        + SVerticalBox::Slot().AutoHeight().Padding(0,5)[Button(TEXT("Загрузить пресет"),[this] { LoadPreset(); })];
-    const auto Card = [](TSharedRef<SWidget> Content) { return SNew(SBorder).Padding(18)
-        .BorderImage(FCoreStyle::Get().GetBrush(TEXT("WhiteBrush"))).BorderBackgroundColor(FLinearColor(.025f,.031f,.038f,.96f))[Content]; };
+        + SVerticalBox::Slot().AutoHeight().Padding(0,8)[Button(Resources, TEXT("Сбросить морфы"),[this] { Morphs.Reset(); ApplyMorphs(); })]
+        + SVerticalBox::Slot().AutoHeight()[Button(Resources, TEXT("Сохранить пресет"),[this] { SavePreset(); })]
+        + SVerticalBox::Slot().AutoHeight().Padding(0,5)[Button(Resources, TEXT("Загрузить пресет"),[this] { LoadPreset(); })];
+    const auto Card = [Resources](TSharedRef<SWidget> Content) { return SNew(SBorder).Padding(12)
+        .BorderImage(T5MenuArt(Resources, TEXT("RacePanel")))[T5MenuContrast(Content, .58f)]; };
     return SNew(SOverlay)
-        + SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(0,22)[Label(TEXT("R A C E M E N U   /   СОЗДАНИЕ ПЕРСОНАЖА"),22)]
+        + SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(0,22)
+        [SNew(SBorder).Padding(FMargin(46, 9)).BorderImage(T5MenuArt(Resources, TEXT("RaceHeader")))
+            [Label(Resources, TEXT("СОЗДАНИЕ ПЕРСОНАЖА"),22)]]
         + SOverlay::Slot().HAlign(HAlign_Left).Padding(24,80,0,110)
         [SNew(SBox).WidthOverride(310)[Card(SNew(SScrollBox)+SScrollBox::Slot()[Left])]]
         + SOverlay::Slot().HAlign(HAlign_Right).Padding(0,80,24,110)
         [SNew(SBox).WidthOverride(290)[Card(Right)]]
         + SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(0,0,0,130)
         [SNew(SHorizontalBox)
-            +SHorizontalBox::Slot().AutoWidth()[Button(TEXT("↶"),[this] { Orbit(-20); })]
-            +SHorizontalBox::Slot().AutoWidth()[Button(TEXT("−"),[this] { Zoom(25); })]
-            +SHorizontalBox::Slot().AutoWidth()[Button(TEXT("+"),[this] { Zoom(-25); })]
-            +SHorizontalBox::Slot().AutoWidth()[Button(TEXT("↷"),[this] { Orbit(20); })]]
-        + SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(20,0,20,16)
-        [Card(SNew(SVerticalBox)
+            +SHorizontalBox::Slot().AutoWidth()[Button(Resources, TEXT("↶"),[this] { Orbit(-20); })]
+            +SHorizontalBox::Slot().AutoWidth()[Button(Resources, TEXT("−"),[this] { Zoom(25); })]
+            +SHorizontalBox::Slot().AutoWidth()[Button(Resources, TEXT("+"),[this] { Zoom(-25); })]
+            +SHorizontalBox::Slot().AutoWidth()[Button(Resources, TEXT("↷"),[this] { Orbit(20); })]]
+        + SOverlay::Slot().VAlign(VAlign_Bottom)
+        [T5MenuBar(Resources, TEXT("RaceBottom"), SNew(SVerticalBox)
             + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
-            [SNew(STextBlock).Text_Lambda([this] { return FText::FromString(Status); }).AutoWrapText(true)]
+            [SNew(STextBlock).Text_Lambda([this] { return FText::FromString(Status); }).AutoWrapText(true).Font(T5MenuFont(Resources, 14, TEXT("Regular")))]
             + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0,8,0,0)
             [SNew(SHorizontalBox)
-                + SHorizontalBox::Slot().AutoWidth()[SNew(SButton).IsEnabled_Lambda([this] { return bReady && !Name.TrimStartAndEnd().IsEmpty(); })
-                    .ContentPadding(FMargin(24,8)).OnClicked_Lambda([this] { Accept(); return FReply::Handled(); })[Label(TEXT("Готово · продолжить"),15)]]
-                + SHorizontalBox::Slot().AutoWidth().Padding(12,0)[SNew(SButton).Visibility(bRequired ? EVisibility::Collapsed : EVisibility::Visible)
-                    .OnClicked_Lambda([this] { Cancel(); return FReply::Handled(); })[Label(TEXT("Отмена"))]]])];
+                + SHorizontalBox::Slot().AutoWidth()[SNew(SButton).ButtonStyle(T5MenuButtonStyle()).IsEnabled_Lambda([this] { return bReady && !Name.TrimStartAndEnd().IsEmpty(); })
+                    .ContentPadding(FMargin(24,8)).OnClicked_Lambda([this] { Accept(); return FReply::Handled(); })[Label(Resources, TEXT("Готово · продолжить"),15)]]
+                + SHorizontalBox::Slot().AutoWidth().Padding(12,0)[SNew(SButton).ButtonStyle(T5MenuButtonStyle()).Visibility(bRequired ? EVisibility::Collapsed : EVisibility::Visible)
+                    .OnClicked_Lambda([this] { Cancel(); return FReply::Handled(); })[Label(Resources, TEXT("Отмена"))]]])];
 }
 void ST5RaceMenu::Construct(const FArguments&,FT5CharacterCreator* Creator) { Model=Creator; ChildSlot[Model->MakePanel()]; }
 FReply ST5RaceMenu::OnKeyDown(const FGeometry&,const FKeyEvent& Event)

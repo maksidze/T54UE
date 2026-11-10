@@ -22,6 +22,7 @@
 #include "T5MaterialSemantics.h"
 #include "T5Titles.h"
 #include "T5Compass.h"
+#include "T5UIResources.h"
 
 #include "Async/Async.h"
 #include "Components/InputComponent.h"
@@ -871,6 +872,9 @@ AT5Scene::AT5Scene()
 void AT5Scene::BeginPlay()
 {
     Super::BeginPlay();
+    FString Data, Plugins, Bridge;
+    if (ResolvePaths(Data, Plugins, Bridge))
+        UIResources = MakeShared<FT5UIResources>(Data, Bridge);
     if (GEngine && !GIsEditor && !FParse::Param(FCommandLine::Get(), TEXT("T5Diagnostics")))
         GEngine->bEnableOnScreenDebugMessages = false;
     if (auto* Controller = GetWorld()->GetFirstPlayerController())
@@ -916,6 +920,7 @@ void AT5Scene::EndPlay(const EEndPlayReason::Type Reason)
     PapyrusErrors.Reset();
     ++CatalogGeneration;
     ClearT5Preview();
+    UIResources.Reset();
     Papyrus.Reset();
     Super::EndPlay(Reason);
 }
@@ -1396,6 +1401,8 @@ void AT5Scene::LoadLocation(uint32 FormId, FIntPoint Cell, bool bRecenter)
 
 void AT5Scene::Tick(float DeltaTime)
 {
+    if (UIResources)
+        UIResources->Poll();
     Super::Tick(DeltaTime);
     TickSceneBuild();
     TickCharacterCreation();
@@ -1584,14 +1591,23 @@ void AT5Scene::TickPresentation()
     Papyrus->GameState(Controls, Flags, SittingRotation);
     const bool bShowCompass = Controller && Viewport && LoadedScene && (!OpeningQuest || bOpeningViewReady)
         && !(Flags & (2u | 64u)) && !bStartupPreparing && !MapBrowser;
+    bCompassVisible = bShowCompass;
     if (bShowCompass && !Compass)
     {
-        Compass = SNew(ST5Compass).Visibility(EVisibility::HitTestInvisible);
+        Compass = SNew(ST5Compass).Resources(UIResources)
+            .Visibility_Lambda([Weak = TWeakObjectPtr<AT5Scene>(this)]
+            {
+                const auto* Scene = Weak.Get();
+                return Scene && Scene->bCompassVisible && !Scene->MapBrowser && !Scene->InventoryMenu
+                    && !Scene->SaveBrowser && !Scene->CharacterCreator
+                    && !(Scene->bSceneLoading && Scene->bFullLoadingScreen)
+                    ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+            });
         Viewport->AddViewportWidgetContent(Compass.ToSharedRef(), 80);
     }
     TArray<FT5CompassTarget> CompassTargets;
     FVector Eye;
-    FRotator View;
+    FRotator View = FRotator::ZeroRotator;
     int32 Width = 0, Height = 0;
     if (bShowCompass)
     {
@@ -1632,7 +1648,8 @@ void AT5Scene::TickPresentation()
                     TOptional<FVector2D> UV;
                     if (Width > 0 && Height > 0 && Controller->ProjectWorldLocationToScreen(Point, Screen))
                         UV = FVector2D(Screen.X / Width, Screen.Y / Height);
-                    CompassTargets.Add({FMath::RadiansToDegrees(FMath::Atan2(Direction.Y, Direction.X)), UV});
+                    const bool bDoor = Mechanics && Mechanics->IsAnimatedDoor(Id);
+                    CompassTargets.Add({FMath::RadiansToDegrees(FMath::Atan2(Direction.Y, Direction.X)), UV, bDoor});
                 }
             continue;
         }
@@ -1759,10 +1776,16 @@ void AT5Scene::TickPresentation()
         if (Titles)
             Titles->Command(Args, Now, *Papyrus);
     }
-    if (Compass)
+    if (Compass && bShowCompass)
     {
-        Compass->SetVisibility(bShowCompass ? EVisibility::HitTestInvisible : EVisibility::Collapsed);
-        if (bShowCompass) Compass->Update(View.Yaw, MoveTemp(CompassTargets));
+        if (Now >= NextPoolRefresh)
+        {
+            bool bDrawn = false;
+            Papyrus->PlayerViewKey(bDrawn);
+            Compass->SetResourcePools(Papyrus->ResourcePoolRatios(), bDrawn);
+            NextPoolRefresh = Now + .2;
+        }
+        Compass->Update(View.Yaw, MoveTemp(CompassTargets), !DialogueMenu && !(Controls & (1u << 6)));
     }
     if (Titles)
     {
@@ -2052,7 +2075,7 @@ void AT5Scene::ApplyPapyrusWorld()
                 && (*Scripted)->Clock.Playback.bReturnToLocomotion;
             const FString Gait = bReturnToLocomotion ? TEXT("T5Idle") : Request ? Request->Event : TEXT("T5Idle");
             const bool bLocomotion = Gait == TEXT("T5Idle") || Gait == TEXT("T5Walk")
-                || Gait == TEXT("T5Jog") || Gait == TEXT("T5Run");
+                || Gait == TEXT("T5FastWalk") || Gait == TEXT("T5Jog") || Gait == TEXT("T5Run");
             if (Mesh && (Visual.AnimationSerial != Serial || Visual.AnimationMount != (bRider ? Parent : 0)))
             {
                 Visual.AnimationSerial = Serial;
@@ -2064,7 +2087,7 @@ void AT5Scene::ApplyPapyrusWorld()
                 const bool bBow = Gait == TEXT("T5Bow");
                 TFunction<void(const FString&)> Annotation;
                 Visual.bPlayedIdle = bLocomotion ? PlayLocomotion(*Mesh, Visual.AnimationProject,
-                        bRider ? TEXT("Rider") + Gait : Gait, ResumeAt, Error)
+                        bRider ? TEXT("Rider") + Gait : Gait, Request ? Request->Speed : 1.f, ResumeAt, Error)
                     : PlayT5Hkx(*Mesh, Request->Behavior, Request->Event, Request->Clip,
                         [this](const FString& Path, TArray<uint8>& Bytes) { return Papyrus->ReadResource(Path, Bytes); },
                         Error, Visual.SkeletonPath, MoveTemp(Annotation), Request->Speed, bBow || Gait == TEXT("T5Execution"), false, ResumeAt);
@@ -2115,7 +2138,7 @@ void AT5Scene::ApplyPapyrusWorld()
 }
 
 bool AT5Scene::PlayLocomotion(USkeletalMeshComponent& Mesh, const FString& Project, const FString& Gait,
-    TOptional<float> ResumeAt, FString& Error)
+    float PlaybackSpeed, TOptional<float> ResumeAt, FString& Error)
 {
     if (Project.IsEmpty())
         return false;
@@ -2149,18 +2172,20 @@ bool AT5Scene::PlayLocomotion(USkeletalMeshComponent& Mesh, const FString& Proje
         Set->Jog = Find(TEXT("TrotForward"));
         Set->Run = Find(TEXT("RunForward"));
     }
-    const auto& File = Movement == TEXT("T5Run") && !Set->Run.IsEmpty() ? Set->Run
-        : Movement == TEXT("T5Jog") && !Set->Jog.IsEmpty() ? Set->Jog
+    const bool bTrot = Movement == TEXT("T5Jog") && !Set->Jog.IsEmpty();
+    const bool bRun = (Movement == TEXT("T5Run") || Movement == TEXT("T5Jog")) && !Set->Run.IsEmpty();
+    const auto& File = bTrot ? Set->Jog : bRun ? Set->Run
         : Movement != TEXT("T5Idle") && !Set->Walk.IsEmpty() ? Set->Walk : Set->Idle;
     if (File.IsEmpty())
         return false;
-    if (PlayT5Hkx(Mesh, {}, {}, File, Read, Error, Set->Rig, {}, 1, false, true, ResumeAt))
+    const float Rate = Movement == TEXT("T5FastWalk") || (bRun && !bTrot) ? PlaybackSpeed : 1.f;
+    if (PlayT5Hkx(Mesh, {}, {}, File, Read, Error, Set->Rig, {}, Rate, false, true, ResumeAt))
         return true;
     const auto ReadBase = [this](const FString& Path, TArray<uint8>& Bytes) {
         return Papyrus->ReadResource(TEXT("@base-animation/") + Path, Bytes);
     };
     FString FallbackError;
-    if (!PlayT5Hkx(Mesh, {}, {}, File, ReadBase, FallbackError, Set->Rig, {}, 1, false, true, ResumeAt))
+    if (!PlayT5Hkx(Mesh, {}, {}, File, ReadBase, FallbackError, Set->Rig, {}, Rate, false, true, ResumeAt))
         return false;
     UE_LOG(LogT5Data, Display, TEXT("T5_HKX_BASE_FALLBACK %s (%s)"), *File, *Error);
     Error.Reset();
@@ -2799,7 +2824,7 @@ AActor* AT5Scene::BuildCharacterPreview(const FT5LoadResult& Data, FString& Erro
             Component->SetLightingChannels(true, false, false);
             FString Project, MotionError;
             if (!Sections.IsEmpty() && Sections[0].Data->TryGetStringField(TEXT("animationProject"), Project))
-                PlayLocomotion(*Component, Project, TEXT("T5Idle"), {}, MotionError);
+                PlayLocomotion(*Component, Project, TEXT("T5Idle"), 1.f, {}, MotionError);
             Component->GlobalAnimRateScale=0;
             Component->SetComponentTickEnabled(false);
             Component->TickAnimation(0,false);

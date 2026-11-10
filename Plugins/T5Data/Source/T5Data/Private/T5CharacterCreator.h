@@ -60,6 +60,7 @@ public:
 
 private:
     friend class FT5RaceMenuSmoke;
+    friend class FT5UISmoke;
     struct FViewOccluder
     {
         TArray<TWeakObjectPtr<UMeshComponent>> Parts;

@@ -65,6 +65,9 @@ class FT5ReferenceAudit final : public IAutomationLatentCommand {
     bool bStepActionStarted = false;
     bool bObservedFallenActor = false;
     bool bObservedExecutionProp = false, bObservedSeveredHead = false;
+    uint32 FallenActor = 0;
+    double RagdollStarted = 0, MaxHipRise = 0;
+    TOptional<double> LastAnimatedHipZ;
     double FallenAt = 0, MaxCorpseDrift = 0;
     TOptional<FVector> CorpseRestPosition;
 
@@ -423,6 +426,9 @@ public:
         FParse::Value(FCommandLine::Get(), TEXT("T5ReferenceLimit="), Limit);
         FParse::Value(FCommandLine::Get(), TEXT("T5ReferenceRoute="), RoutePath);
         FParse::Value(FCommandLine::Get(), TEXT("T5ReferenceSave="), SaveSlot);
+        FString Actor;
+        if (FParse::Value(FCommandLine::Get(), TEXT("T5ReferenceFallenActor="), Actor))
+            FallenActor = uint32(FCString::Strtoui64(*Actor, nullptr, 16));
     }
     bool Update() override {
         auto* S = Scene.Get();
@@ -484,29 +490,34 @@ public:
                         FScreenshotRequest::RequestScreenshot(Output / TEXT("execution-head.png"), false, false);
                     }
         }
-        FString FallenActor;
-        if (!bObservedFallenActor && FParse::Value(FCommandLine::Get(), TEXT("T5ReferenceFallenActor="), FallenActor))
+        if (FallenActor)
         {
-            const auto Id = uint32(FCString::Strtoui64(*FallenActor, nullptr, 16));
-            if (const auto* Rig = S->FindReferenceSkeleton(Id); Rig && S->Ragdolled.Contains(Id))
+            if (const auto* Rig = S->FindReferenceSkeleton(FallenActor); Rig && Rig->IsVisible())
             {
-                const auto Hip = Rig->GetSocketLocation(TEXT("NPC COM [COM ]"));
+                const auto Hip = Rig->GetSocketLocation(TEXT("NPC Pelvis [Pelv]"));
                 const auto Head = Rig->GetSocketLocation(TEXT("NPC Head [Head]"));
-                if (FMath::Abs(Head.Z - Hip.Z) < 45)
+                if (!S->Ragdolled.Contains(FallenActor) && !RagdollStarted)
+                    LastAnimatedHipZ = Hip.Z;
+                else if (S->Ragdolled.Contains(FallenActor))
                 {
-                    bObservedFallenActor = true;
-                    FallenAt = S->SimulationTime;
-                    UE_LOG(LogTemp, Display, TEXT("T5_REFERENCE_FALLEN ref=%08X hip=%s head=%s"), Id,
-                        *Hip.ToCompactString(), *Head.ToCompactString());
+                    if (!RagdollStarted) RagdollStarted = S->SimulationTime;
+                    if (LastAnimatedHipZ && S->SimulationTime - RagdollStarted <= .5)
+                        MaxHipRise = FMath::Max(MaxHipRise, Hip.Z - *LastAnimatedHipZ);
+                    if (!bObservedFallenActor && FMath::Abs(Head.Z - Hip.Z) < 45)
+                    {
+                        bObservedFallenActor = true;
+                        FallenAt = S->SimulationTime;
+                        UE_LOG(LogTemp, Display, TEXT("T5_REFERENCE_FALLEN ref=%08X hip=%s head=%s"), FallenActor,
+                            *Hip.ToCompactString(), *Head.ToCompactString());
+                    }
                 }
             }
         }
         if (bObservedFallenActor && FParse::Param(FCommandLine::Get(), TEXT("T5ReferenceCorpseRest")))
         {
             const double SinceFall = S->SimulationTime - FallenAt;
-            if (SinceFall >= 4 && SinceFall <= 11
-                && FParse::Value(FCommandLine::Get(), TEXT("T5ReferenceFallenActor="), FallenActor))
-                if (const auto* Rig = S->FindReferenceSkeleton(FCString::Strtoui64(*FallenActor, nullptr, 16)))
+            if (SinceFall >= 4 && SinceFall <= 11)
+                if (const auto* Rig = S->FindReferenceSkeleton(FallenActor))
                 {
                     const auto Pelvis = Rig->GetSocketLocation(TEXT("NPC Pelvis [Pelv]"));
                     if (!CorpseRestPosition) CorpseRestPosition = Pelvis;
@@ -533,8 +544,13 @@ public:
             Test.TestTrue(TEXT("The execution prop is attached during the authored entry"), bObservedExecutionProp);
             Test.TestTrue(TEXT("Decapitate leaves the body headless and spawns a physical head"), bObservedSeveredHead);
         }
-        if (FParse::Value(FCommandLine::Get(), TEXT("T5ReferenceFallenActor="), FallenActor))
+        if (FallenActor)
+        {
             Test.TestTrue(TEXT("The shot actor settled horizontally as a ragdoll"), bObservedFallenActor);
+            Test.AddInfo(FString::Printf(TEXT("Pelvis rise in the first half-second of ragdoll: %.2f cm"), MaxHipRise));
+            Test.TestTrue(TEXT("The actor does not launch upward at the start of ragdoll"),
+                LastAnimatedHipZ.IsSet() && RagdollStarted > 0 && MaxHipRise < 25);
+        }
         if (FParse::Param(FCommandLine::Get(), TEXT("T5ReferenceCorpseRest")))
         {
             Test.AddInfo(FString::Printf(TEXT("Corpse drift over seven seconds after impact: %.2f cm"), MaxCorpseDrift));

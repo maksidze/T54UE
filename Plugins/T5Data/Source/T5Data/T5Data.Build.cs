@@ -11,6 +11,7 @@ public class T5Data : ModuleRules
             "Chaos", "ChaosCore", "ImageCore", "ImageWrapper", "Json", "MeshDescription", "PhysicsCore", "Projects",
             "InputCore", "RenderCore", "RHI", "Slate", "SlateCore", "StaticMeshDescription"
         });
+        AddEngineThirdPartyPrivateStaticDependencies(Target, "zlib");
         if (Target.Platform == UnrealTargetPlatform.Win64)
         {
             string Root = Path.Combine(PluginDirectory, "Binaries", "ThirdParty", "Win64");

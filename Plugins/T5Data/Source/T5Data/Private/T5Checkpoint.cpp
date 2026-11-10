@@ -9,6 +9,7 @@
 #include "T5HkxCamera.h"
 #include "T5ReferenceAnimation.h"
 #include "T5Titles.h"
+#include "T5MenuStyle.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
@@ -28,7 +29,10 @@
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SConstraintCanvas.h"
 #include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/SOverlay.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Input/Reply.h"
@@ -237,44 +241,90 @@ public:
     void Construct(const FArguments&, AT5Scene* Scene)
     {
         Owner = Scene;
+        const auto Resources = Scene->UIResources;
+        const auto CanSave = TAttribute<bool>::CreateLambda([Weak = Owner] {
+            const auto* S = Weak.Get();
+            return S && S->Papyrus && S->ActiveLocation && !S->bSceneLoading && !S->bStartupPreparing
+                && !S->bRestoringCheckpoint;
+        });
         auto Rows = SNew(SVerticalBox);
         const auto Entries = SavedGames();
         for (const auto& Entry : Entries)
         {
             const auto Slot = Entry.Slot;
             Rows->AddSlot().AutoHeight().Padding(0, 4)
-            [ SNew(SButton).IsEnabled(Entry.bValid)
+            [ SNew(SButton).ButtonStyle(T5MenuButtonStyle()).IsEnabled(Entry.bValid)
                 .OnClicked_Lambda([Weak = Owner, Slot] {
                     if (auto* S = Weak.Get()) S->LoadGameSlot(Slot);
                     return FReply::Handled();
                 })
-                [SNew(STextBlock).Text(FText::FromString(Entry.Label))] ];
+                [SNew(STextBlock).Text(FText::FromString(Entry.Label)).Font(T5MenuFont(Resources, 21))] ];
         }
         if (Entries.IsEmpty()) Rows->AddSlot().AutoHeight().Padding(10)
-            [SNew(STextBlock).Text(FText::FromString(TEXT("Сохранений пока нет")))];
-        ChildSlot.HAlign(HAlign_Center).VAlign(VAlign_Center)
-        [ SNew(SBox).WidthOverride(780).HeightOverride(620)
-            [SNew(SBorder).Padding(24)
-                [SNew(SVerticalBox)
-                    + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 12)
-                    [SNew(STextBlock).Text(FText::FromString(TEXT("Сохранения"))).Font(FCoreStyle::GetDefaultFontStyle("Bold", 24))]
-                    + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 12)
-                    [SNew(STextBlock).Text(FText::FromString(TEXT("Выберите сохранение для загрузки. Самые новые — сверху.")))]
-                    + SVerticalBox::Slot().FillHeight(1)
-                    [SNew(SScrollBox) + SScrollBox::Slot()[Rows]]
-                    + SVerticalBox::Slot().AutoHeight().Padding(0, 16, 0, 8)
-                    [SNew(SButton).HAlign(HAlign_Center).IsEnabled_Lambda([Weak = Owner] {
-                        const auto* S = Weak.Get(); return S && S->Papyrus && S->ActiveLocation
-                            && !S->bSceneLoading && !S->bStartupPreparing && !S->bRestoringCheckpoint;
-                    }).Text(FText::FromString(TEXT("Создать новое сохранение")))
-                        .OnClicked_Lambda([Weak = Owner] {
-                            if (auto* S = Weak.Get()) { S->CloseSaveBrowser(); S->SaveGameSlot(NewSlot(TEXT("Manual"))); }
-                            return FReply::Handled();
-                        })]
-                    + SVerticalBox::Slot().AutoHeight()
-                    [SNew(SButton).HAlign(HAlign_Center).Text(FText::FromString(TEXT("Вернуться в игру · Esc")))
-                        .OnClicked_Lambda([Weak = Owner] { if (auto* S = Weak.Get()) S->CloseSaveBrowser(); return FReply::Handled(); })]
+            [SNew(STextBlock).Text(FText::FromString(TEXT("Сохранений пока нет"))).Font(T5MenuFont(Resources, 21))];
+        ChildSlot
+        [
+            SNew(SConstraintCanvas)
+            + SConstraintCanvas::Slot().Anchors(FAnchors(0, 0, 1, 1)).Offset(FMargin(0))
+            [T5MenuBackdrop()]
+            + SConstraintCanvas::Slot().Anchors(FAnchors(.12f, .065f, .88f, .845f)).Offset(FMargin(0))
+            [
+                SNew(SOverlay)
+                + SOverlay::Slot()
+                [
+                    SNew(SBorder).BorderImage(T5MenuArt(Resources, TEXT("JournalPanel")))
+                        .BorderBackgroundColor(FLinearColor(1, 1, 1, .72f))
+                    [
+                        SNew(SConstraintCanvas)
+                        + SConstraintCanvas::Slot().Anchors(FAnchors(.12f, .0f, .91f, .079f)).Offset(FMargin(0))
+                        [SNew(SBox).HAlign(HAlign_Right).VAlign(VAlign_Center)
+                            [SNew(STextBlock).Text(FText::FromString(TEXT("СИСТЕМА"))).Font(T5MenuFont(Resources, 30))]]
+                        + SConstraintCanvas::Slot().Anchors(FAnchors(.055f, .15f, .25f, .94f)).Offset(FMargin(0))
+                        [
+                            SNew(SBox).VAlign(VAlign_Center)
+                            [
+                                SNew(SVerticalBox)
+                                + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
+                                [
+                                    SNew(SButton).ButtonStyle(T5MenuButtonStyle()).IsEnabled(CanSave)
+                                        .OnClicked_Lambda([Weak = Owner] {
+                                            if (auto* S = Weak.Get()) { S->CloseSaveBrowser(); S->QuickSave(); }
+                                            return FReply::Handled();
+                                        })
+                                    [SNew(STextBlock).Text(FText::FromString(TEXT("БЫСТРОЕ СОХРАНЕНИЕ"))).Font(T5MenuFont(Resources, 21))]
+                                ]
+                                + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0, 5)
+                                [
+                                    SNew(SButton).ButtonStyle(T5MenuButtonStyle()).IsEnabled(CanSave)
+                                        .OnClicked_Lambda([Weak = Owner] {
+                                            if (auto* S = Weak.Get()) { S->CloseSaveBrowser(); S->SaveGameSlot(NewSlot(TEXT("Manual"))); }
+                                            return FReply::Handled();
+                                        })
+                                    [SNew(STextBlock).Text(FText::FromString(TEXT("СОХРАНИТЬ"))).Font(T5MenuFont(Resources, 21))]
+                                ]
+                                + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(7, 3)
+                                [SNew(STextBlock).Text(FText::FromString(TEXT("ЗАГРУЗИТЬ"))).Font(T5MenuFont(Resources, 26))]
+                            ]
+                        ]
+                        + SConstraintCanvas::Slot().Anchors(FAnchors(.265f, .117f, .278f, .97f)).Offset(FMargin(0))
+                        [SNew(SImage).Image(T5MenuArt(Resources, TEXT("JournalDivider"), false))]
+                        + SConstraintCanvas::Slot().Anchors(FAnchors(.31f, .205f, .935f, .93f)).Offset(FMargin(0))
+                        [
+                            SNew(SVerticalBox)
+                            + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 17)
+                            [SNew(STextBlock).Text(FText::FromString(TEXT("СОХРАНЕНИЯ"))).Font(T5MenuFont(Resources, 28))]
+                            + SVerticalBox::Slot().FillHeight(1)
+                            [SNew(SScrollBox) + SScrollBox::Slot()[Rows]]
+                        ]
+                    ]
                 ]
+            ]
+            + SConstraintCanvas::Slot().Anchors(FAnchors(0, .893f, 1, 1)).Offset(FMargin(0))
+            [
+                T5MenuBar(Resources, TEXT("JournalBottom"),
+                    SNew(SButton).ButtonStyle(T5MenuButtonStyle()).HAlign(HAlign_Left)
+                        .OnClicked_Lambda([Weak = Owner] { if (auto* S = Weak.Get()) S->CloseSaveBrowser(); return FReply::Handled(); })
+                        [SNew(STextBlock).Text(FText::FromString(TEXT("[Esc]  НАЗАД"))).Font(T5MenuFont(Resources, 20))])
             ]
         ];
     }

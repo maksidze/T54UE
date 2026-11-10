@@ -75,6 +75,9 @@ struct FT5PapyrusApi
     void* (*AnimationObject)(const void*, const char*);
     const char* (*Dialogue)(void*, int, uint32);
     void* (*DestructionModel)(const void*, uint32);
+    const char* (*InventoryPresentation)(void*, uint32);
+    void* (*InventoryModel)(const void*, uint32);
+    int (*ResourcePools)(const void*, float*);
 };
 
 void FT5PapyrusRuntime::SetLineOfSight(int (*Callback)(void*, uint32, uint32), void* Context)
@@ -207,9 +210,32 @@ void FT5PapyrusRuntime::DialogueAction(ET5DialogueAction Action, uint32 Choice)
 
 bool FT5PapyrusRuntime::Inventory(uint32 Owner, TArray<TSharedPtr<FJsonValue>>& Entries) const
 {
-    const auto* Text = Handle && Api->Inventory ? Api->Inventory(Handle, Owner) : nullptr;
+    if (!Handle || !Api->Inventory)
+        return false;
+    const auto* Text = Api->InventoryPresentation ? Api->InventoryPresentation(Handle, Owner) : Api->Inventory(Handle, Owner);
     return Text && FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(FString(UTF8_TO_TCHAR(Text))), Entries)
         && !Entries.IsEmpty();
+}
+
+TUniquePtr<FT5LoadResult> FT5PapyrusRuntime::InventoryModel(uint32 Item) const
+{
+    if (!Handle || !Api->InventoryModel)
+        return {};
+    auto Result = MakeUnique<FT5LoadResult>();
+    Result->GetBuffer = Api->GetBuffer;
+    Result->Release = Api->Release;
+    Result->Handle = Api->InventoryModel(Handle, Item);
+    if (!Result->Handle)
+        return {};
+    Result->Error = UTF8_TO_TCHAR(Api->GetError(Result->Handle));
+    return Result;
+}
+
+FVector3f FT5PapyrusRuntime::ResourcePoolRatios() const
+{
+    float Ratios[3];
+    return Handle && Api->ResourcePools && Api->ResourcePools(Handle, Ratios)
+        ? FVector3f(Ratios[0], Ratios[1], Ratios[2]) : FVector3f(-1);
 }
 
 bool FT5PapyrusRuntime::InventoryAction(uint32 Owner, uint32 Item, int32 Count)
@@ -654,7 +680,10 @@ TUniquePtr<FT5LoadResult> LoadT5Scene(const FString& Data, const FString& Plugin
         reinterpret_cast<decltype(FT5PapyrusApi::SeveredHead)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusSeveredHead"))),
         reinterpret_cast<decltype(FT5PapyrusApi::AnimationObject)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusAnimationObject"))),
         reinterpret_cast<decltype(FT5PapyrusApi::Dialogue)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusDialogue"))),
-        reinterpret_cast<decltype(FT5PapyrusApi::DestructionModel)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusDestructionModel")))
+        reinterpret_cast<decltype(FT5PapyrusApi::DestructionModel)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusDestructionModel"))),
+        reinterpret_cast<decltype(FT5PapyrusApi::InventoryPresentation)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusInventoryPresentation"))),
+        reinterpret_cast<decltype(FT5PapyrusApi::InventoryModel)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusInventoryModel"))),
+        reinterpret_cast<decltype(FT5PapyrusApi::ResourcePools)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusResourcePools")))
     };
     const auto GetError = reinterpret_cast<const char* (*)(const void*)>(
         FPlatformProcess::GetDllExport(Library, TEXT("T5DataGetError")));

@@ -92,7 +92,7 @@ private:
     friend class FT5RaceMenuSmoke;
     friend class FT5LightingSmoke;
     void TickCharacterCreation();
-    AActor* BuildCharacterPreview(const FT5LoadResult& Data, FString& Error);
+    AActor* BuildCharacterPreview(const FT5LoadResult& Data, FString& Error, bool bPreview = true);
     TSharedPtr<class FT5CharacterCreator> CharacterCreator;
     bool bAutoRaceMenuUsed = false;
     friend class ST5MapBrowser;
@@ -153,6 +153,19 @@ private:
     void ReadyPlayerWeapon();
     void AttackPlayerWeapon();
     void TickFirstPerson();
+    void TickPlayerBody();
+    void DestroyPlayerBody();
+    void TogglePlayerPerspective();
+    void ZoomPlayerIn();
+    void ZoomPlayerOut();
+    bool CanChangePlayerPerspective() const;
+    TWeakObjectPtr<AActor> PlayerBody;
+    uint64 PlayerBodyKey = 0;
+    FString PlayerBodyProject;
+    FString PlayerBodyGait;
+    float PlayerBodyScale = 1.f;
+    float PlayerCameraDistance = 0.f;
+    float LastThirdPersonDistance = 240.f;
     void PlayViewAttack();
     bool BuildFirstPersonView(const struct FT5LoadResult& Data);
     bool PlayFirstPersonClip(const FString& Clip, bool bLoop);
@@ -172,6 +185,7 @@ private:
     bool bInventoryWasPaused = false;
     void ApplyPapyrusState();
     void ApplyPapyrusWorld();
+    bool HasExecutionCamera(uint32 Controls, uint32 Flags) const;
     void TickAnimations();
     void AnimationVisualEvent(uint32 Id, const FString& Event);
     void TickAnimationVisuals();

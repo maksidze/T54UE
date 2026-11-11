@@ -529,6 +529,72 @@ namespace
 
 }
 
+bool ReadT5HkxRagdoll(TConstArrayView<uint8> Skeleton, FT5HkxRagdoll& Out)
+{
+    FPack Pack(Skeleton);
+    if (!Pack.Open()) return false;
+    const int32 Instance = Pack.Find(TEXT("hkaRagdollInstance"));
+    if (Instance == INDEX_NONE) return false;
+    // hkaRagdollInstance contains two pointer arrays followed by the bone-to-body map and its skeleton.
+    const auto [Bodies, BodyCount] = Pack.Array(Instance + 16, 8);
+    const auto [Joints, JointCount] = Pack.Array(Instance + 32, 8);
+    const auto [BodyMap, BoneCount] = Pack.Array(Instance + 48, 4);
+    const int32 RagdollSkeleton = Pack.Ref(Instance + 64);
+    if (BodyCount <= 0 || BodyCount > 2048 || JointCount <= 0 || JointCount > 4096 || BoneCount > 2048
+        || Pack.Objects.FindRef(RagdollSkeleton) != TEXT("hkaSkeleton"))
+        return false;
+
+    FT5HkxRagdoll Rig;
+    Rig.Bodies.SetNum(BodyCount);
+    // The simple skeleton mappings associate the ragdoll bones with the animated mesh bone names.
+    for (const auto& [Pos, Class] : Pack.Objects)
+    {
+        if (Class != TEXT("hkaSkeletonMapper") || Pack.Ref(Pos + 16) != RagdollSkeleton) continue;
+        const int32 AnimatedSkeleton = Pack.Ref(Pos + 24);
+        if (Pack.Objects.FindRef(AnimatedSkeleton) != TEXT("hkaSkeleton")) return false;
+        const auto [AnimatedBones, AnimatedCount] = Pack.Array(AnimatedSkeleton + 40, 16);
+        const auto [Mappings, MappingCount] = Pack.Array(Pos + 32, 64);
+        if (MappingCount > 2048) return false;
+        for (int32 Index = 0; Index < MappingCount; ++Index)
+        {
+            const int32 At = Mappings + Index * 64;
+            const int32 RagdollBone = Pack.File.At<int16>(At);
+            const int32 AnimatedBone = Pack.File.At<int16>(At + 2);
+            if (RagdollBone < 0 || RagdollBone >= BoneCount || AnimatedBone < 0 || AnimatedBone >= AnimatedCount)
+                return false;
+            const int32 Body = Pack.File.At<int32>(BodyMap + RagdollBone * 4);
+            if (Body == INDEX_NONE) continue;
+            if (!Rig.Bodies.IsValidIndex(Body) || !Rig.Bodies[Body].IsNone()) return false;
+            Rig.Bodies[Body] = FName(*Pack.RefString(AnimatedBones + AnimatedBone * 16));
+        }
+        break;
+    }
+    TMap<int32, FName> BodyNames;
+    TSet<FName> UniqueNames;
+    for (int32 Index = 0; Index < BodyCount; ++Index)
+    {
+        const int32 Body = Pack.Ref(Bodies + Index * 8);
+        const FName Name = Rig.Bodies[Index];
+        if (Pack.Objects.FindRef(Body) != TEXT("hkpRigidBody") || BodyNames.Contains(Body)
+            || Name.IsNone() || UniqueNames.Contains(Name))
+            return false;
+        BodyNames.Add(Body, Name);
+        UniqueNames.Add(Name);
+    }
+    for (int32 Index = 0; Index < JointCount; ++Index)
+    {
+        const int32 Joint = Pack.Ref(Joints + Index * 8);
+        if (Pack.Objects.FindRef(Joint) != TEXT("hkpConstraintInstance")) return false;
+        // The two entries in hkpConstraintInstance::entities point at the joined rigid bodies.
+        const FName A = BodyNames.FindRef(Pack.Ref(Joint + 40)), B = BodyNames.FindRef(Pack.Ref(Joint + 48));
+        if (A.IsNone() || B.IsNone() || A == B) return false;
+        Rig.Joints.Emplace(A, B);
+    }
+    if (!Pack.File.bValid) return false;
+    Out = MoveTemp(Rig);
+    return true;
+}
+
 bool ReadT5HkxClip(TConstArrayView<uint8> Skeleton, TConstArrayView<uint8> Animation, FT5HkxClip& Out, FString& Error)
 {
     FPack Rig(Skeleton), File(Animation);

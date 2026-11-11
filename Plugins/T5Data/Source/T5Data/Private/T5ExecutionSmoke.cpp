@@ -4,8 +4,11 @@
 #include "T5Scene.h"
 #include "T5Bridge.h"
 #include "T5CharacterCreator.h"
+#include "T5PlayerPawn.h"
 #include "Engine/Engine.h"
 #include "EngineUtils.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/PlayerController.h"
 #include "UnrealClient.h"
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
@@ -64,6 +67,7 @@ class FT5ExecutionFlowSmoke final : public IAutomationLatentCommand
     FAutomationTestBase& Test;
     TWeakObjectPtr<AT5Scene> Scene;
     double Started = FPlatformTime::Seconds(), Poll = 0;
+    bool bCheckedScriptedMovement = false;
 public:
     FT5ExecutionFlowSmoke(FAutomationTestBase& InTest, AT5Scene* InScene) : Test(InTest), Scene(InScene) {}
     bool Update() override
@@ -78,6 +82,15 @@ public:
             return false;
         }
         if (!S->Papyrus || S->bSceneLoading || S->bStartupPreparing || S->bRestoringCheckpoint) return false;
+        const auto* PC = S->GetWorld()->GetFirstPlayerController();
+        const auto* Player = PC ? Cast<AT5PlayerPawn>(PC->GetPawn()) : nullptr;
+        if (!Test.TestNotNull(TEXT("The player has a character before and after the execution"), Player)) return true;
+        if (!bCheckedScriptedMovement && S->HasExecutionCamera(S->AppliedControls, S->AppliedGameFlags)
+            && Player->GetCharacterMovement()->MovementMode == MOVE_None)
+        {
+            bCheckedScriptedMovement = true;
+            Test.TestTrue(TEXT("The scripted camera preserves the intro's movement lock"), PC->IsMoveInputIgnored());
+        }
         if (FPlatformTime::Seconds() < Poll) return false;
         Poll = FPlatformTime::Seconds() + 1;
         FString Path, Log;
@@ -93,8 +106,11 @@ public:
         Test.TestEqual(TEXT("Movement is restored by the original stage-160 fragment"), Controls & 1u, 0u);
         Test.TestEqual(TEXT("Player is neither AI-driven nor restrained"), Flags & (4u | 128u), 0u);
         Test.TestFalse(TEXT("Player execution clip resolves"), Log.Contains(TEXT("T5_ANIMATION_LOAD_ERROR ref=00000014")));
-        Test.TestTrue(TEXT("On-foot execution uses an original first-person camera"), Log.Contains(TEXT("event=IdleExecutionerChop_Player"))
+        Test.TestTrue(TEXT("On-foot execution uses an original first-person camera"), Log.Contains(TEXT("IdleExecutionerChop_Player"))
             && Log.Contains(TEXT("T5_HKX_CAMERA idle=")));
+        Test.TestTrue(TEXT("The cinematic runs with character movement suspended"), bCheckedScriptedMovement);
+        Test.TestTrue(TEXT("The player leaves the cinematic in a ground movement mode"),
+            Player->GetCharacterMovement()->IsMovingOnGround() || Player->GetCharacterMovement()->IsFalling());
         Test.TestTrue(TEXT("Real player reaction dispatches the furniture exit"), Log.Contains(TEXT("ref=00000014 event=IdleFurnitureExit")));
         AddInfo();
         return true;

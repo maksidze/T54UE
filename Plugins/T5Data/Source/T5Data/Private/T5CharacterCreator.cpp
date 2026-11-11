@@ -1,5 +1,6 @@
 #include "T5CharacterCreator.h"
 #include "T5Scene.h"
+#include "T5PlayerPawn.h"
 #include "T5Bridge.h"
 #include "T5Mechanics.h"
 #include "T5Titles.h"
@@ -132,6 +133,8 @@ bool FT5CharacterCreator::Open(AT5Scene& Scene, bool Required)
         Feet=Origin.TransformPosition(Pose.GetLocation());
         Heading=(Origin.GetRotation()*Pose.GetRotation()).Rotator();
     }
+    else if (const auto* Player = Cast<AT5PlayerPawn>(Controller->GetPawn()))
+        Feet = Player->Feet();
     else if (auto* Pawn=Controller->GetPawnOrSpectator())
         Feet=Pawn->GetActorLocation()-FVector(0,0,Runtime->PlayerEyeHeight()*Origin.GetScale3D().Z);
     else if (LogicalPlayer) Feet=Origin.TransformPosition(LogicalPlayer->GetLocation());
@@ -159,6 +162,7 @@ bool FT5CharacterCreator::Open(AT5Scene& Scene, bool Required)
     if (auto* Parts=Scene.ReferenceVisuals.Find(0x14))
         for (auto& Part : *Parts) if (auto* Component=Part.Component.Get())
         { HiddenPlayerParts.Add({Component,Component->IsVisible()}); Component->SetVisibility(false); }
+    if (auto* Body = Scene.PlayerBody.Get()) Body->SetActorHiddenInGame(true);
     // Capture only originally visible meshes. Group each reference's parts so
     // an obstructing NPC disappears together with its hair and equipment.
     TSet<UMeshComponent*> Grouped;
@@ -291,8 +295,16 @@ void FT5CharacterCreator::Close()
         {
             if (PreviousView.IsValid()) Controller->SetViewTarget(PreviousView.Get());
             if (bAccepted)
-                if (auto* Pawn=Controller->GetPawnOrSpectator())
+            {
+                Scene->DestroyPlayerBody();
+                if (auto* Player = Cast<AT5PlayerPawn>(Controller->GetPawn()))
+                {
+                    Player->SetEyeHeight(Runtime->PlayerEyeHeight() * Scene->GetActorScale3D().Z);
+                    Player->PlaceFeet(WorldPlacement.GetLocation());
+                }
+                else if (auto* Pawn=Controller->GetPawnOrSpectator())
                     Pawn->SetActorLocation(WorldPlacement.GetLocation()+FVector(0,0,Runtime->PlayerEyeHeight()*Scene->GetActorScale3D().Z),false,nullptr,ETeleportType::TeleportPhysics);
+            }
             Controller->SetInputMode(FInputModeGameOnly()); Controller->bShowMouseCursor = bPreviousCursor;
             if (Controller->PlayerCameraManager) Controller->PlayerCameraManager->UpdateCamera(0);
         }

@@ -57,7 +57,7 @@ if ($catalog.entries.Count -ne $fileCount -or
     @($catalog.entries.path | Sort-Object -Unique).Count -ne $fileCount) {
     throw "The catalog does not match the archive's $fileCount file entries."
 }
-foreach ($asset in $catalog.art.PSObject.Properties) {
+$sourceArt = foreach ($asset in $catalog.art.PSObject.Properties | Sort-Object Name) {
     $bitmap = $asset.Value
     if ($bitmap.source -notin $catalog.entries.path -or !$bitmap.symbol) {
         throw "Missing source movie or symbol for $($asset.Name)."
@@ -71,7 +71,16 @@ foreach ($asset in $catalog.art.PSObject.Properties) {
         if ($bytes[$pixel] -gt 0) { $hasInk = $true; break }
     }
     if (!$hasInk) { throw "Empty bitmap for $($asset.Name)." }
+    [ordered]@{
+        name = $asset.Name
+        movie = $bitmap.source
+        symbol = $bitmap.symbol
+        width = $bitmap.width
+        height = $bitmap.height
+        shapes = $bitmap.shapes
+    }
 }
+ConvertTo-Json -InputObject @($sourceArt) | Set-Content -LiteralPath (Join-Path $outputDir 'source-art.json') -Encoding utf8
 $fontFaces = @($catalog.fonts.PSObject.Properties.Name)
 $expectedConfig = "interface/fontconfig_$($catalog.language).txt"
 if ($expectedConfig -notin $catalog.entries.path) { $expectedConfig = 'interface/fontconfig.txt' }

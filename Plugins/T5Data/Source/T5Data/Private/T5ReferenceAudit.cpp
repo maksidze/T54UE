@@ -3,12 +3,15 @@
 #include "T5Bridge.h"
 #include "T5Coordinates.h"
 #include "T5Mechanics.h"
+#include "T5PlayerPawn.h"
 #include "T5CharacterCreator.h"
 #include "T5ReferenceAnimation.h"
 #include "GameFramework/PawnMovementComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/ExponentialHeightFogComponent.h"
@@ -25,6 +28,8 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Parse.h"
 #include "HAL/FileManager.h"
+#include "PhysicsEngine/PhysicsAsset.h"
+#include "PhysicsEngine/PhysicsConstraintTemplate.h"
 #include "Serialization/JsonSerializer.h"
 #include "UnrealClient.h"
 
@@ -63,13 +68,72 @@ class FT5ReferenceAudit final : public IAutomationLatentCommand {
     int32 RouteIndex = 0;
     double StepStarted = 0;
     bool bStepActionStarted = false;
+    bool bPlayerRose = false;
+    FVector PlayerStepOrigin = FVector::ZeroVector;
     bool bObservedFallenActor = false;
     bool bObservedExecutionProp = false, bObservedSeveredHead = false;
     uint32 FallenActor = 0;
     double RagdollStarted = 0, MaxHipRise = 0;
     TOptional<double> LastAnimatedHipZ;
+    bool bCheckRagdollRig = false, bComparedRagdollRig = false;
+    double MaxJointGap = 0;
+    FName WorstJoint;
     double FallenAt = 0, MaxCorpseDrift = 0;
     TOptional<FVector> CorpseRestPosition;
+
+    void InspectRagdoll(AT5Scene& S, USkeletalMeshComponent& Mesh)
+    {
+        const auto* Asset = Mesh.GetPhysicsAsset();
+        if (!Asset) return;
+        if (!bComparedRagdollRig)
+        {
+            bComparedRagdollRig = true;
+            const auto& Parts = S.ReferenceVisuals.FindChecked(FallenActor);
+            const auto* Part = Parts.FindByPredicate([&Mesh](const auto& Visual) { return Visual.Component.Get() == &Mesh; });
+            TArray<uint8> Bytes;
+            FT5HkxRagdoll SourceRig;
+            if (!Test.TestTrue(TEXT("Read ragdoll bodies and joints from the actor's original HKX"),
+                    Part && S.Papyrus->ReadResource(Part->SkeletonPath, Bytes) && ReadT5HkxRagdoll(Bytes, SourceRig)))
+                return;
+            Test.TestEqual(TEXT("Ragdoll body count matches HKX"), Asset->SkeletalBodySetups.Num(), SourceRig.Bodies.Num());
+            Test.TestEqual(TEXT("Ragdoll joint count matches HKX"), Asset->ConstraintSetup.Num(), SourceRig.Joints.Num());
+            for (const FName Bone : SourceRig.Bodies)
+            {
+                const auto* Body = Mesh.GetBodyInstance(Bone);
+                Test.TestTrue(TEXT("Simulating body for ") + Bone.ToString(), Body && Body->IsInstanceSimulatingPhysics());
+            }
+            for (const auto& [A, B] : SourceRig.Joints)
+            {
+                const bool bConnected = Asset->ConstraintSetup.ContainsByPredicate([A, B](const auto& Template) {
+                    const auto& Joint = Template->DefaultInstance;
+                    return (Joint.ConstraintBone1 == A && Joint.ConstraintBone2 == B)
+                        || (Joint.ConstraintBone1 == B && Joint.ConstraintBone2 == A);
+                });
+                Test.TestTrue(FString::Printf(TEXT("HKX joint %s / %s"), *A.ToString(), *B.ToString()), bConnected);
+            }
+            Test.AddInfo(FString::Printf(TEXT("Compared %s with %d HKX bodies and %d joints"),
+                *Part->SkeletonPath, SourceRig.Bodies.Num(), SourceRig.Joints.Num()));
+        }
+        for (int32 Index = 0; Index < Asset->ConstraintSetup.Num(); ++Index)
+        {
+            const auto* Joint = Mesh.GetConstraintInstanceByIndex(Index);
+            if (!Joint || !Joint->IsValidConstraintInstance()) continue;
+            const auto* A = Mesh.GetBodyInstance(Joint->ConstraintBone1);
+            const auto* B = Mesh.GetBodyInstance(Joint->ConstraintBone2);
+            if (!A || !B) continue;
+            const double Scale = Joint->GetLastKnownScale();
+            const FVector AnchorA = A->GetUnrealWorldTransform().TransformPositionNoScale(
+                Joint->GetRefFrame(EConstraintFrame::Frame1).GetLocation() * Scale);
+            const FVector AnchorB = B->GetUnrealWorldTransform().TransformPositionNoScale(
+                Joint->GetRefFrame(EConstraintFrame::Frame2).GetLocation() * Scale);
+            const double Gap = FVector::Distance(AnchorA, AnchorB);
+            if (Gap > MaxJointGap)
+            {
+                MaxJointGap = Gap;
+                WorstJoint = Joint->JointName;
+            }
+        }
+    }
 
     bool FollowRoute(AT5Scene& S, APlayerController& PC)
     {
@@ -98,7 +162,9 @@ class FT5ReferenceAudit final : public IAutomationLatentCommand {
         const auto& Step = Route[RouteIndex]->AsObject();
         auto* Pawn = PC.GetPawnOrSpectator();
         const auto Root = S.GetActorTransform();
-        const auto Foot = Pawn ? Pawn->GetActorLocation() - Root.TransformVectorNoScale(FVector(0,0,S.Papyrus->PlayerEyeHeight())) : FVector::ZeroVector;
+        auto* Player = Cast<AT5PlayerPawn>(Pawn);
+        const auto Foot = Player ? Player->Feet() : Pawn
+            ? Pawn->GetActorLocation() - Root.TransformVectorNoScale(FVector(0,0,S.Papyrus->PlayerEyeHeight())) : FVector::ZeroVector;
         const auto Advance = [&] {
             UE_LOG(LogTemp, Display, TEXT("T5_ROUTE_STEP %d %s"), RouteIndex, *Step->GetStringField(TEXT("name")));
             ++RouteIndex; StepStarted = 0; bStepActionStarted = false;
@@ -179,23 +245,106 @@ class FT5ReferenceAudit final : public IAutomationLatentCommand {
         FString ViewAction;
         if (Step->TryGetStringField(TEXT("view_test"), ViewAction))
         {
+            if (ViewAction == TEXT("third_person") || ViewAction == TEXT("first_person"))
+            {
+                if (!Test.TestNotNull(TEXT("Playable scenes possess a character"), Player)) return true;
+                const bool bThirdPerson = ViewAction == TEXT("third_person");
+                if (!bStepActionStarted)
+                {
+                    const FKey Key = EKeys::F;
+                    PC.InputKey(FInputKeyEventArgs(nullptr, INPUTDEVICEID_NONE, Key, IE_Pressed, FPlatformTime::Cycles64()));
+                    PC.InputKey(FInputKeyEventArgs(nullptr, INPUTDEVICEID_NONE, Key, IE_Released, FPlatformTime::Cycles64()));
+                    bStepActionStarted = true;
+                    return false;
+                }
+                const auto* Body = S.PlayerBody.Get();
+                if (Player->IsThirdPerson() != bThirdPerson || !Body || Body->IsHidden() == bThirdPerson)
+                    return false;
+                if (bThirdPerson)
+                {
+                    Test.TestTrue(TEXT("The body is placed at the character's feet"), Body->GetActorLocation().Equals(Foot, 1.));
+                    Test.TestTrue(TEXT("First-person arms are hidden in third person"),
+                        !S.FirstPersonActor.IsValid() || S.FirstPersonActor->IsHidden());
+                }
+                FScreenshotRequest::RequestScreenshot(Output / (TEXT("view-") + ViewAction + TEXT(".png")), false, false);
+                Advance();
+                return false;
+            }
+            const bool bUnarmed = ViewAction == TEXT("unarmed");
             if (!bStepActionStarted)
             {
                 if (S.bSceneLoading && S.bFullLoadingScreen) return false;
                 bStepActionStarted = true;
                 if (ViewAction == TEXT("attack")) S.AttackPlayerWeapon();
-                else S.ReadyPlayerWeapon();
+                else
+                {
+                    bool bDrawn = false;
+                    S.Papyrus->PlayerViewKey(bDrawn);
+                    if (!bUnarmed || !bDrawn) S.ReadyPlayerWeapon();
+                }
                 return false;
             }
             const bool bWeapon = S.FirstPersonWeapon.IsValid();
             const bool bReady = ViewAction == TEXT("draw") && bWeapon && S.bViewDrawn && S.bViewWeaponVisible && !S.bViewTransition;
             const bool bAttacking = ViewAction == TEXT("attack") && bWeapon && S.FirstPersonClip.Contains(TEXT("attack"));
             const bool bHolstered = ViewAction == TEXT("holster") && bWeapon && !S.bViewDrawn && !S.bViewTransition;
-            if (bReady || bAttacking || bHolstered)
+            const bool bFistsReady = bUnarmed && S.FirstPersonArms.IsValid() && S.FirstPersonWeaponType == 0
+                && S.bViewDrawn && !S.bViewTransition && S.FirstPersonClip == TEXT("h2h_idle");
+            if (bReady || bAttacking || bHolstered || bFistsReady)
             {
+                if (bFistsReady)
+                {
+                    FVector Eye;
+                    FRotator View;
+                    PC.GetPlayerViewPoint(Eye, View);
+                    Test.TestTrue(TEXT("The on-foot camera has a level horizon"),
+                        FMath::Abs(FRotator::NormalizeAxis(View.Roll)) < .01);
+                }
                 FScreenshotRequest::RequestScreenshot(Output / (TEXT("view-") + ViewAction + TEXT(".png")), false, false);
                 Advance();
             }
+            return false;
+        }
+        FString PlayerAction;
+        if (Step->TryGetStringField(TEXT("player_test"), PlayerAction))
+        {
+            if (!Test.TestNotNull(TEXT("Playable scenes possess a character"), Player)) return true;
+            const bool bJump = PlayerAction == TEXT("jump");
+            const auto* Movement = Player->GetCharacterMovement();
+            const auto Input = [&](EInputEvent Event)
+            {
+                const auto Key = bJump ? EKeys::SpaceBar : EKeys::W;
+                PC.InputKey(FInputKeyEventArgs(nullptr, INPUTDEVICEID_NONE, Key, Event, FPlatformTime::Cycles64()));
+            };
+            if (!bStepActionStarted)
+            {
+                if (!Movement->IsMovingOnGround()) return false;
+                Test.TestTrue(TEXT("Walking uses a blocking capsule"),
+                    Player->GetCapsuleComponent()->GetCollisionResponseToChannel(ECC_WorldStatic) == ECR_Block
+                    && CollisionEnabledHasQuery(Player->GetCapsuleComponent()->GetCollisionEnabled()));
+                PlayerStepOrigin = Foot;
+                bPlayerRose = false;
+                bStepActionStarted = true;
+                if (!bJump) PC.SetControlRotation(FRotator(35, PC.GetControlRotation().Yaw, 0));
+                Input(IE_Pressed);
+                return false;
+            }
+            if (bJump)
+            {
+                if (!bPlayerRose && Movement->IsFalling() && Foot.Z > PlayerStepOrigin.Z + 15.)
+                {
+                    bPlayerRose = true;
+                    Input(IE_Released);
+                }
+                if (!bPlayerRose || !Movement->IsMovingOnGround()) return false;
+            }
+            else
+            {
+                if (FVector::DistSquared2D(Foot, PlayerStepOrigin) < FMath::Square(45.)) return false;
+                Input(IE_Released);
+                Test.TestTrue(TEXT("Looking up while moving forward keeps the player on the floor"), Movement->IsMovingOnGround());
+            }
+            Advance();
             return false;
         }
         double Owner = 0, Item = 0;
@@ -429,6 +578,7 @@ public:
         FString Actor;
         if (FParse::Value(FCommandLine::Get(), TEXT("T5ReferenceFallenActor="), Actor))
             FallenActor = uint32(FCString::Strtoui64(*Actor, nullptr, 16));
+        bCheckRagdollRig = FParse::Param(FCommandLine::Get(), TEXT("T5ReferenceRagdollRig"));
     }
     bool Update() override {
         auto* S = Scene.Get();
@@ -492,7 +642,7 @@ public:
         }
         if (FallenActor)
         {
-            if (const auto* Rig = S->FindReferenceSkeleton(FallenActor); Rig && Rig->IsVisible())
+            if (auto* Rig = S->FindReferenceSkeleton(FallenActor); Rig && Rig->IsVisible())
             {
                 const auto Hip = Rig->GetSocketLocation(TEXT("NPC Pelvis [Pelv]"));
                 const auto Head = Rig->GetSocketLocation(TEXT("NPC Head [Head]"));
@@ -501,6 +651,8 @@ public:
                 else if (S->Ragdolled.Contains(FallenActor))
                 {
                     if (!RagdollStarted) RagdollStarted = S->SimulationTime;
+                    if (bCheckRagdollRig && S->SimulationTime - RagdollStarted <= 1)
+                        InspectRagdoll(*S, *Rig);
                     if (LastAnimatedHipZ && S->SimulationTime - RagdollStarted <= .5)
                         MaxHipRise = FMath::Max(MaxHipRise, Hip.Z - *LastAnimatedHipZ);
                     if (!bObservedFallenActor && FMath::Abs(Head.Z - Hip.Z) < 45)
@@ -555,6 +707,12 @@ public:
         {
             Test.AddInfo(FString::Printf(TEXT("Corpse drift over seven seconds after impact: %.2f cm"), MaxCorpseDrift));
             Test.TestTrue(TEXT("Ragdoll stops sliding after the fall"), CorpseRestPosition.IsSet() && MaxCorpseDrift < 20);
+        }
+        if (bCheckRagdollRig)
+        {
+            Test.TestTrue(TEXT("Compared the live ragdoll with its HKX rig"), bComparedRagdollRig);
+            Test.AddInfo(FString::Printf(TEXT("Peak ragdoll joint separation in the first second: %.2f cm (%s)"),
+                MaxJointGap, *WorstJoint.ToString()));
         }
         FString ExpectedWeather;
         if (FParse::Value(FCommandLine::Get(), TEXT("T5ReferenceExpectedWeather="), ExpectedWeather))

@@ -5,6 +5,7 @@
 #include "T5Archery.h"
 #include "T5Mechanics.h"
 #include "GameFramework/SpectatorPawn.h"
+#include "T5PlayerPawn.h"
 #include "T5HkxAnimInstance.h"
 #include "T5HkxCamera.h"
 #include "T5ReferenceAnimation.h"
@@ -395,7 +396,16 @@ void AT5Scene::SerializeCheckpoint(FArchive& Ar)
     FTransform Player = FTransform::Identity; FRotator View = FRotator::ZeroRotator;
     if (Ar.IsSaving())
         if (auto* Controller = GetWorld()->GetFirstPlayerController())
-        { if (auto* Pawn = Controller->GetPawnOrSpectator()) Player = Pawn->GetActorTransform(); View = Controller->GetControlRotation(); }
+        {
+            if (const auto* Pawn = Controller->GetPawnOrSpectator())
+            {
+                Player = Pawn->GetActorTransform();
+                // Keep the eye-space representation used by existing checkpoints.
+                if (const auto* Character = Cast<AT5PlayerPawn>(Pawn))
+                    Player.SetLocation(Character->GetPawnViewLocation());
+            }
+            View = Controller->GetControlRotation();
+        }
     Ar << Player << View;
     if (Ar.IsLoading()) { CheckpointPlayer = Player; CheckpointView = View; }
     Papyrus->SerializeCheckpoint(Ar);
@@ -560,24 +570,39 @@ void AT5Scene::FinishCheckpointLoad()
         if (auto* Pawn = Controller->GetPawnOrSpectator(); Pawn && CheckpointPlayer)
         {
             if (auto* Movement = Pawn->GetMovementComponent()) Movement->StopMovementImmediately();
-            Pawn->SetActorTransform(*CheckpointPlayer, false, nullptr, ETeleportType::TeleportPhysics);
             // Older checkpoints used a fixed 92-unit eye offset after dismount.
             // Normalize that legacy on-foot view without moving the player's feet.
+            FVector Eye = CheckpointPlayer->GetLocation();
+            const float EyeHeight = Papyrus->PlayerEyeHeight() * GetActorScale3D().Z;
             FTransform Authored; uint32 Parent=0;
             if (const auto Pose=Papyrus->ReferenceTransform(0x14,Authored,Parent); Pose && !Parent && !LastPlayerVehicle)
             {
                 const auto Standing=Mechanics ? Mechanics->CorrectPose(0x14,0,*Pose) : *Pose;
                 const FVector Feet=GetActorTransform().TransformPosition(Standing.GetLocation());
-                const FVector View=Pawn->GetActorLocation();
                 const float Scale=GetActorScale3D().Z;
-                if (FVector::DistSquared2D(View,Feet)<FMath::Square(15.f)
-                    && FMath::Abs((View.Z-Feet.Z)-92*T5CentimetersPerUnit*Scale)<5)
+                if (FVector::DistSquared2D(Eye,Feet)<FMath::Square(15.f)
+                    && FMath::Abs((Eye.Z-Feet.Z)-92*T5CentimetersPerUnit*Scale)<5)
                 {
-                    Pawn->SetActorLocation(FVector(View.X,View.Y,Feet.Z+Papyrus->PlayerEyeHeight()*Scale),false,nullptr,ETeleportType::TeleportPhysics);
-                    UE_LOG(LogTemp,Display,TEXT("T5_STANDING_CAMERA_RESTORED old=%.2f new=%.2f"),View.Z-Feet.Z,Papyrus->PlayerEyeHeight()*Scale);
+                    UE_LOG(LogTemp,Display,TEXT("T5_STANDING_CAMERA_RESTORED old=%.2f new=%.2f"),Eye.Z-Feet.Z,EyeHeight);
+                    Eye.Z = Feet.Z + EyeHeight;
                 }
             }
+            if (auto* Character = Cast<AT5PlayerPawn>(Pawn))
+            {
+                Character->SetEyeHeight(EyeHeight);
+                if (LastPlayerVehicle || HasExecutionCamera(AppliedControls, AppliedGameFlags))
+                    Character->SetScriptedEye(Eye);
+                else
+                    Character->PlaceFeet(Eye - FVector(0, 0, EyeHeight));
+            }
+            else
+            {
+                CheckpointPlayer->SetLocation(Eye);
+                Pawn->SetActorTransform(*CheckpointPlayer, false, nullptr, ETeleportType::TeleportPhysics);
+            }
         }
+        if (!LastPlayerVehicle && !HasExecutionCamera(AppliedControls, AppliedGameFlags))
+            CheckpointView.Roll = 0;
         Controller->SetControlRotation(CheckpointView);
     }
     CheckpointPlayer.Reset();

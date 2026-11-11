@@ -1,4 +1,5 @@
 #include "T5Scene.h"
+#include "T5PlayerPawn.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "T5Bridge.h"
@@ -239,7 +240,10 @@ private:
         const FVector Front = S.GetActorTransform().TransformVectorNoScale(Pose.GetRotation().GetForwardVector());
         const FVector Eye = Target + Front * 190 + FVector(0, 0, S.Papyrus->PlayerEyeHeight());
         const FRotator View = (Target + FVector(0, 0, 140) - Eye).Rotation();
-        Pawn->SetActorLocationAndRotation(Eye, View, false, nullptr, ETeleportType::TeleportPhysics);
+        if (auto* Player = Cast<AT5PlayerPawn>(Pawn))
+            Player->PlaceFeet(Player->Feet() + Eye - Player->GetPawnViewLocation());
+        else
+            Pawn->SetActorLocationAndRotation(Eye, View, false, nullptr, ETeleportType::TeleportPhysics);
         Controller->SetControlRotation(View);
         Controller->SetViewTarget(Pawn);
         if (Controller->PlayerCameraManager)

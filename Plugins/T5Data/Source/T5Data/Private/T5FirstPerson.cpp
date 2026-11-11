@@ -1,6 +1,7 @@
 #include "T5Scene.h"
 #include "T5Bridge.h"
 #include "T5Hkx.h"
+#include "T5PlayerPawn.h"
 
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -102,8 +103,9 @@ void AT5Scene::TickFirstPerson()
 {
     const auto* Controller = GetWorld()->GetFirstPlayerController();
     const auto* Pawn = Controller ? Controller->GetPawnOrSpectator() : nullptr;
+    const auto* Character = Cast<AT5PlayerPawn>(Pawn);
     if (!Papyrus || !Pawn || Controller->GetViewTarget() != Pawn || (bSceneLoading && bFullLoadingScreen) || bStartupPreparing
-        || CharacterCreator || !(AppliedGameFlags & 1u))
+        || CharacterCreator || (Character && Character->IsThirdPerson()) || !(AppliedGameFlags & 1u))
     {
         if (auto* View = FirstPersonActor.Get()) View->SetActorHiddenInGame(true);
         return;

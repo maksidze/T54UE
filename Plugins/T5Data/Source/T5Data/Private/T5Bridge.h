@@ -99,6 +99,7 @@ public:
     TUniquePtr<FT5LoadResult> DestructionModel(uint32 Id) const;
     uint64 PlayerViewKey(bool& bDrawn) const;
     TUniquePtr<FT5LoadResult> PlayerView() const;
+    TUniquePtr<FT5LoadResult> PlayerBody() const;
     void Tick(double Seconds);
     void SetGamepad(bool bActive);
     bool ReadResource(const FString& Path, TArray<uint8>& Bytes) const;

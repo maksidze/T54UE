@@ -24,7 +24,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogT5UI, Log, All);
 
 namespace
 {
-    constexpr int32 CacheVersion = 8;
+    constexpr int32 CacheVersion = 9;
     constexpr uint32 CompressionToggle = 0x40000000;
     constexpr int32 MaxMovieBytes = 8 * 1024 * 1024;
     constexpr int32 MaxFontMovieBytes = 32 * 1024 * 1024;
@@ -374,6 +374,7 @@ namespace
                 || !(*Asset)->TryGetNumberField(TEXT("width"), Bitmap.Size.X)
                 || !(*Asset)->TryGetNumberField(TEXT("height"), Bitmap.Size.Y)
                 || Bitmap.Size.GetMin() <= 0 || Bitmap.Size.GetMax() > 2048
+                || !(*Asset)->TryGetNumberField(TEXT("shapes"), Bitmap.Shapes) || Bitmap.Shapes < 1 || Bitmap.Shapes > 32
                 || !(*Asset)->TryGetStringField(TEXT("source"), Bitmap.Source)
                 || !(*Asset)->TryGetStringField(TEXT("symbol"), Bitmap.Symbol)
                 || !(*Asset)->TryGetStringField(TEXT("bgra"), Encoded)
@@ -437,6 +438,7 @@ namespace
             auto Asset = MakeShared<FJsonObject>();
             Asset->SetNumberField(TEXT("width"), Bitmap.Size.X);
             Asset->SetNumberField(TEXT("height"), Bitmap.Size.Y);
+            Asset->SetNumberField(TEXT("shapes"), Bitmap.Shapes);
             Asset->SetStringField(TEXT("source"), Bitmap.Source);
             Asset->SetStringField(TEXT("symbol"), Bitmap.Symbol);
             Asset->SetStringField(TEXT("bgra"), FBase64::Encode(reinterpret_cast<const uint8*>(Bitmap.Pixels.GetData()),

@@ -71,6 +71,7 @@ struct FT5PapyrusApi
     int (*WasKilled)(const void*, uint32);
     uint64 (*ViewKey)(const void*, int*);
     void* (*PlayerView)(const void*);
+    void* (*PlayerBody)(const void*);
     const char* (*SeveredHead)(const void*, uint32);
     void* (*AnimationObject)(const void*, const char*);
     const char* (*Dialogue)(void*, int, uint32);
@@ -276,6 +277,17 @@ TUniquePtr<FT5LoadResult> FT5PapyrusRuntime::PlayerView() const
     Result->GetBuffer = Api->GetBuffer;
     Result->Release = Api->Release;
     Result->Handle = Api->PlayerView(Handle);
+    Result->Error = UTF8_TO_TCHAR(Api->GetError(Result->Handle));
+    return Result;
+}
+
+TUniquePtr<FT5LoadResult> FT5PapyrusRuntime::PlayerBody() const
+{
+    if (!Handle || !Api->PlayerBody) return {};
+    auto Result = MakeUnique<FT5LoadResult>();
+    Result->GetBuffer = Api->GetBuffer;
+    Result->Release = Api->Release;
+    Result->Handle = Api->PlayerBody(Handle);
     Result->Error = UTF8_TO_TCHAR(Api->GetError(Result->Handle));
     return Result;
 }
@@ -677,6 +689,7 @@ TUniquePtr<FT5LoadResult> LoadT5Scene(const FString& Data, const FString& Plugin
         reinterpret_cast<decltype(FT5PapyrusApi::WasKilled)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusWasKilled"))),
         reinterpret_cast<decltype(FT5PapyrusApi::ViewKey)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusViewKey"))),
         reinterpret_cast<decltype(FT5PapyrusApi::PlayerView)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusPlayerView"))),
+        reinterpret_cast<decltype(FT5PapyrusApi::PlayerBody)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusPlayerBody"))),
         reinterpret_cast<decltype(FT5PapyrusApi::SeveredHead)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusSeveredHead"))),
         reinterpret_cast<decltype(FT5PapyrusApi::AnimationObject)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusAnimationObject"))),
         reinterpret_cast<decltype(FT5PapyrusApi::Dialogue)>(FPlatformProcess::GetDllExport(Library, TEXT("T5PapyrusDialogue"))),

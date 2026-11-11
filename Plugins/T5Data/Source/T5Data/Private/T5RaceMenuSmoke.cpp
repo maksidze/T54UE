@@ -144,7 +144,7 @@ public:
             Test.TestFalse(TEXT("World resumes after confirmation"),UGameplayStatics::IsGamePaused(S->GetWorld()));
             auto* Controller=S->GetWorld()->GetFirstPlayerController();
             Test.TestTrue(TEXT("The original player camera is restored"),Controller->GetViewTarget()==OriginalView.Get());
-            const FVector Eye=Controller->GetPawnOrSpectator()->GetActorLocation();
+            const FVector Eye=Controller->GetPawnOrSpectator()->GetPawnViewLocation();
             Test.TestTrue(TEXT("First person returns at character eye level"),FMath::IsNearlyEqual(Eye.Z-PlayerFeet.Z,S->Papyrus->PlayerEyeHeight()*S->GetActorScale3D().Z,.1));
             Test.TestTrue(TEXT("Standing eye level is above the old crouched offset"),S->Papyrus->PlayerEyeHeight()>160);
             uint32 Controls, Flags; float Rotation; S->Papyrus->GameState(Controls,Flags,Rotation);

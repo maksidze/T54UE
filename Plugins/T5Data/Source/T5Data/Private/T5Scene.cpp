@@ -23,6 +23,7 @@
 #include "T5Titles.h"
 #include "T5Compass.h"
 #include "T5UIResources.h"
+#include "T5PlayerPawn.h"
 
 #include "Async/Async.h"
 #include "Components/InputComponent.h"
@@ -896,6 +897,10 @@ void AT5Scene::BeginPlay()
             InputComponent->BindKey(EKeys::I, IE_Pressed, this, &AT5Scene::OpenPlayerInventory);
             InputComponent->BindKey(EKeys::R, IE_Pressed, this, &AT5Scene::ReadyPlayerWeapon);
             InputComponent->BindKey(EKeys::LeftMouseButton, IE_Pressed, this, &AT5Scene::AttackPlayerWeapon);
+            InputComponent->BindKey(EKeys::F, IE_Pressed, this, &AT5Scene::TogglePlayerPerspective);
+            InputComponent->BindKey(EKeys::Gamepad_RightThumbstick, IE_Pressed, this, &AT5Scene::TogglePlayerPerspective);
+            InputComponent->BindKey(EKeys::MouseScrollUp, IE_Pressed, this, &AT5Scene::ZoomPlayerIn);
+            InputComponent->BindKey(EKeys::MouseScrollDown, IE_Pressed, this, &AT5Scene::ZoomPlayerOut);
         }
     }
     if (FParse::Param(FCommandLine::Get(), TEXT("T5SelectSave")))
@@ -910,6 +915,7 @@ void AT5Scene::EndPlay(const EEndPlayReason::Type Reason)
 {
     ClearAnimationVisuals();
     DestroyFirstPersonView();
+    DestroyPlayerBody();
     CloseInventory();
     if (CharacterCreator) { CharacterCreator->Close(); CharacterCreator.Reset(); }
     CloseSaveBrowser();
@@ -1074,6 +1080,8 @@ void AT5Scene::ClearT5Preview()
     LastPlayerHeading.Reset();
     LastPlayerScriptPose.Reset();
     LastPlayerVehicle = 0;
+    DestroyPlayerBody();
+    PlayerCameraDistance = 0.f;
     bOpeningViewReady = false;
     Locomotion.Reset();
     RecentTextures.Reset();
@@ -1405,6 +1413,10 @@ void AT5Scene::Tick(float DeltaTime)
         UIResources->Poll();
     Super::Tick(DeltaTime);
     TickSceneBuild();
+    if (auto* PC = GetWorld()->GetFirstPlayerController())
+        if (auto* Player = Cast<AT5PlayerPawn>(PC->GetPawn()))
+            Player->SuspendMovement(!LoadedScene || bRestoringCheckpoint || (bSceneLoading && bFullLoadingScreen)
+                || LastPlayerVehicle || HasExecutionCamera(AppliedControls, AppliedGameFlags));
     TickCharacterCreation();
     if (CharacterCreator)
     {
@@ -1452,12 +1464,14 @@ void AT5Scene::Tick(float DeltaTime)
                     {
                         const FTransform Origin = GetActorTransform();
                         FTransform Player = *LastPlayerScriptPose;
-                        const auto Foot = Origin.InverseTransformPosition(Pawn->GetActorLocation())
-                            - FVector(0, 0, Papyrus->PlayerEyeHeight());
-                        if (FVector::DistSquared(Foot, Player.GetLocation()) > .25)
+                        const auto* Character = Cast<AT5PlayerPawn>(Pawn);
+                        const auto Foot = Character ? Origin.InverseTransformPosition(Character->Feet())
+                            : Origin.InverseTransformPosition(Pawn->GetActorLocation()) - FVector(0, 0, Papyrus->PlayerEyeHeight());
+                        const auto Heading = Origin.InverseTransformRotation(FRotator(0, PC->GetControlRotation().Yaw, 0).Quaternion());
+                        if (FVector::DistSquared(Foot, Player.GetLocation()) > .25 || !Player.GetRotation().Equals(Heading))
                         {
                             Player.SetLocation(Foot);
-                            Player.SetRotation(Origin.InverseTransformRotation(FRotator(0, PC->GetControlRotation().Yaw, 0).Quaternion()));
+                            Player.SetRotation(Heading);
                             Papyrus->AnimationPose(0x14, Player, false);
                             LastPlayerScriptPose = Player;
                             LastPlayerHeading = Origin.TransformRotation(Player.GetRotation());
@@ -1472,6 +1486,7 @@ void AT5Scene::Tick(float DeltaTime)
                         : FMath::Min(1.f,UPhysicsSettings::Get()->MaxPhysicsDeltaTime/FMath::Max(DeltaTime,UE_SMALL_NUMBER));
         ApplyPapyrusState();
         ApplyPapyrusWorld();
+        TickPlayerBody();
         TickFirstPerson();
         // Bootstrap scripts may create new references. Keep the loading screen until
         // their scene rebuild and the authored camera have both been applied.
@@ -1494,7 +1509,7 @@ void AT5Scene::Tick(float DeltaTime)
             {
                 if (const auto* Controller = GetWorld()->GetFirstPlayerController())
                     if (const auto* Pawn = Controller->GetPawnOrSpectator())
-                        return Pawn->GetActorLocation();
+                        return Pawn->GetPawnViewLocation();
             }
             if (const auto* Visuals = ReferenceVisuals.Find(Source))
                 for (const auto& Visual : *Visuals)
@@ -1856,6 +1871,8 @@ void AT5Scene::InteractT5()
     FVector Eye;
     FRotator View;
     Controller->GetPlayerViewPoint(Eye, View);
+    if (const auto* Pawn = Cast<AT5PlayerPawn>(Controller->GetPawn()))
+        Eye = Pawn->GetPawnViewLocation();
     TArray<FHitResult> Hits;
     FCollisionQueryParams Query(SCENE_QUERY_STAT(T5Activate), true, Controller->GetPawnOrSpectator());
     GetWorld()->LineTraceMultiByChannel(Hits, Eye, Eye + View.Vector() * 450, ECC_Visibility, Query);
@@ -1921,6 +1938,16 @@ void AT5Scene::ApplyPapyrusState()
                 }
 }
 
+bool AT5Scene::HasExecutionCamera(uint32 Controls, uint32 Flags) const
+{
+    if (!Papyrus) return false;
+    const auto* Request = Papyrus->AnimationRequests().Find(0x14);
+    return Request && ((Flags & (4u | 128u)) || (Controls & 1u))
+        && (Request->Event == TEXT("IdleExecutionerChop_Player")
+            || Request->Event == TEXT("IdleExecutionerAlduinReactionDeath")
+            || Request->Event.StartsWith(TEXT("Behavior37/")));
+}
+
 void AT5Scene::ApplyPapyrusWorld()
 {
     if (bRestoringCheckpoint) return;
@@ -1943,12 +1970,11 @@ void AT5Scene::ApplyPapyrusWorld()
         if (auto* Hud = Controller->GetHUD(); Hud && ((Flags ^ AppliedGameFlags) & 2u))
             Hud->bShowHUD = (Flags & 2u) == 0;
         FTransform Authored;
-        uint32 Vehicle;
-        const auto* CameraRequest = Papyrus->AnimationRequests().Find(0x14);
-        const bool bExecutionCamera = CameraRequest && ((Flags & (4u | 128u)) || (Controls & 1u))
-            && (CameraRequest->Event == TEXT("IdleExecutionerChop_Player")
-                || CameraRequest->Event == TEXT("IdleExecutionerAlduinReactionDeath")
-                || CameraRequest->Event.StartsWith(TEXT("Behavior37/")));
+        uint32 Vehicle = 0;
+        const bool bExecutionCamera = HasExecutionCamera(Controls, Flags);
+        auto* Character = Cast<AT5PlayerPawn>(Controller->GetPawn());
+        if (Character && !bExecutionCamera)
+            Character->SetScriptedEye({});
         if (auto* Pawn = Controller->GetPawnOrSpectator())
             if (const auto Player = Papyrus->ReferenceTransform(0x14, Authored, Vehicle);
                 Player && (Vehicle || bExecutionCamera || LastPlayerVehicle || !LastPlayerScriptPose || !Player->Equals(*LastPlayerScriptPose)))
@@ -2013,7 +2039,15 @@ void AT5Scene::ApplyPapyrusWorld()
                 }
                 if (auto* Effects = VehiclePostProcess.Get())
                     Effects->bEnabled = Vehicle != 0;
-                Pawn->SetActorLocation(Origin.TransformPosition(Eye), false, nullptr, ETeleportType::TeleportPhysics);
+                if (Character)
+                {
+                    Character->SetEyeHeight(Papyrus->PlayerEyeHeight() * Origin.GetScale3D().Z);
+                    if (Vehicle || bExecutionCamera)
+                        Character->SetScriptedEye(Origin.TransformPosition(Eye));
+                    Character->PlaceFeet(Origin.TransformPosition(PlayerPose.GetLocation()));
+                }
+                else
+                    Pawn->SetActorLocation(Origin.TransformPosition(Eye), false, nullptr, ETeleportType::TeleportPhysics);
                 if (OpeningQuest && (!LastLoggedPlayerPose || FVector::DistSquared(*LastLoggedPlayerPose, Eye) > FMath::Square(600.)))
                 {
                     LastLoggedPlayerPose = Eye;
@@ -2022,7 +2056,7 @@ void AT5Scene::ApplyPapyrusWorld()
                 // Roll in the terrain fit belongs to the chassis. The scripted camera
                 // still drives its heading while the local view keeps a stable horizon.
                 auto ViewBase = (Origin.GetRotation() * LocalHeading).Rotator();
-                if (Vehicle) ViewBase.Roll = 0;
+                if (Vehicle || !bExecutionCamera) ViewBase.Roll = 0;
                 const FQuat Heading = ViewBase.Quaternion();
                 if (!LastPlayerHeading)
                 {
@@ -2035,7 +2069,7 @@ void AT5Scene::ApplyPapyrusWorld()
                 {
                     auto View = (Heading * LastPlayerHeading->Inverse()
                         * Controller->GetControlRotation().Quaternion()).Rotator();
-                    if (Vehicle) View.Roll = 0;
+                    if (Vehicle || !bExecutionCamera) View.Roll = 0;
                     Controller->SetControlRotation(View);
                 }
                 if (Vehicle && SittingRotation != AppliedSittingRotation)
@@ -2047,6 +2081,16 @@ void AT5Scene::ApplyPapyrusWorld()
                 }
                 LastPlayerHeading = Heading;
             }
+        // The player can regain control without a change in the actor transform.
+        if (!Vehicle && !bExecutionCamera)
+        {
+            auto View = Controller->GetControlRotation();
+            if (!FMath::IsNearlyZero(FRotator::NormalizeAxis(View.Roll)))
+            {
+                View.Roll = 0;
+                Controller->SetControlRotation(View);
+            }
+        }
     }
     AppliedControls = Controls;
     AppliedGameFlags = Flags;
@@ -2666,18 +2710,37 @@ FT5FrameTask AT5Scene::BuildScene(TUniquePtr<FT5LoadResult> Data, FT5LoadRequest
             if (auto* Controller = GetWorld()->GetFirstPlayerController())
             {
                 const FRotator Rotation(0, GetActorRotation().Yaw - Metadata->GetNumberField(TEXT("yaw")), 0);
-                auto* Pawn = Cast<ASpectatorPawn>(Controller->GetPawnOrSpectator());
+                const bool bGrounded = Request.bPlayable && !FParse::Param(FCommandLine::Get(), TEXT("T5FreeCamera"));
+                APawn* Previous = Controller->GetPawn();
+                APawn* Pawn = bGrounded ? static_cast<APawn*>(Cast<AT5PlayerPawn>(Previous))
+                    : static_cast<APawn*>(Cast<ASpectatorPawn>(Controller->GetPawnOrSpectator()));
                 if (!Pawn)
                 {
-                    Pawn = GetWorld()->SpawnActor<ASpectatorPawn>(Start, Rotation, Spawn);
+                    FActorSpawnParameters PlayerSpawn = Spawn;
+                    PlayerSpawn.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+                    Pawn = bGrounded ? static_cast<APawn*>(GetWorld()->SpawnActor<AT5PlayerPawn>(Start, Rotation, PlayerSpawn))
+                        : static_cast<APawn*>(GetWorld()->SpawnActor<ASpectatorPawn>(Start, Rotation, PlayerSpawn));
                     if (Pawn)
+                    {
                         Controller->Possess(Pawn);
+                        if (Previous && Controller->GetPawn() == Pawn)
+                            Previous->Destroy();
+                    }
                 }
                 if (Pawn)
                 {
-                    if (auto* Movement = Pawn->GetMovementComponent())
-                        Movement->StopMovementImmediately();
-                    Pawn->SetActorLocationAndRotation(Start, Rotation, false, nullptr, ETeleportType::TeleportPhysics);
+                    if (auto* Character = Cast<AT5PlayerPawn>(Pawn))
+                    {
+                        Character->SuspendMovement(true);
+                        Character->SetScriptedEye({});
+                        Character->PlaceFeet(Start - FVector(0, 0, (Papyrus ? Papyrus->PlayerEyeHeight() : 164.f) * GetActorScale3D().Z));
+                    }
+                    else
+                    {
+                        if (auto* Movement = Pawn->GetMovementComponent())
+                            Movement->StopMovementImmediately();
+                        Pawn->SetActorLocationAndRotation(Start, Rotation, false, nullptr, ETeleportType::TeleportPhysics);
+                    }
                     Controller->SetControlRotation(Rotation);
                     Controller->SetViewTarget(Pawn);
                 }
@@ -2715,7 +2778,7 @@ FT5FrameTask AT5Scene::BuildScene(TUniquePtr<FT5LoadResult> Data, FT5LoadRequest
                             if (const auto* Pawn = PC->GetPawnOrSpectator())
                             {
                                 Query.AddIgnoredActor(Pawn);
-                                return Pawn->GetActorLocation();
+                                return Pawn->GetPawnViewLocation();
                             }
                     if (const auto* Visuals = Scene.ReferenceVisuals.Find(Id))
                         for (const auto& Visual : *Visuals)
@@ -2796,7 +2859,101 @@ void AT5Scene::TickCharacterCreation()
     else if (!bAutoRaceMenuUsed && FParse::Param(FCommandLine::Get(), TEXT("T5RaceMenu")))
     { bAutoRaceMenuUsed = true; OpenRaceMenu(); }
 }
-AActor* AT5Scene::BuildCharacterPreview(const FT5LoadResult& Data, FString& Error)
+bool AT5Scene::CanChangePlayerPerspective() const
+{
+    const auto* PC = GetWorld()->GetFirstPlayerController();
+    return PC && Cast<AT5PlayerPawn>(PC->GetPawn()) && PC->GetViewTarget() == PC->GetPawn()
+        && Papyrus && !(AppliedControls & (1u << 2)) && !LastPlayerVehicle
+        && !HasExecutionCamera(AppliedControls, AppliedGameFlags) && !bRestoringCheckpoint
+        && !(bSceneLoading && bFullLoadingScreen) && !bStartupPreparing
+        && !MapBrowser && !SaveBrowser && !InventoryMenu && !DialogueMenu && !CharacterCreator;
+}
+
+void AT5Scene::TogglePlayerPerspective()
+{
+    if (CanChangePlayerPerspective())
+        PlayerCameraDistance = PlayerCameraDistance > 0 ? 0.f : LastThirdPersonDistance;
+}
+
+void AT5Scene::ZoomPlayerIn()
+{
+    if (CanChangePlayerPerspective() && PlayerCameraDistance > 0)
+    {
+        PlayerCameraDistance = PlayerCameraDistance <= 120.f ? 0.f : FMath::Max(120.f, PlayerCameraDistance - 48.f);
+        if (PlayerCameraDistance > 0) LastThirdPersonDistance = PlayerCameraDistance;
+    }
+}
+
+void AT5Scene::ZoomPlayerOut()
+{
+    if (CanChangePlayerPerspective())
+        LastThirdPersonDistance = PlayerCameraDistance = PlayerCameraDistance <= 0
+            ? 120.f : FMath::Min(480.f, PlayerCameraDistance + 48.f);
+}
+
+void AT5Scene::DestroyPlayerBody()
+{
+    if (auto* Body = PlayerBody.Get()) Body->Destroy();
+    PlayerBody.Reset();
+    PlayerBodyKey = 0;
+    PlayerBodyGait.Reset();
+    PlayerBodyProject.Reset();
+}
+
+void AT5Scene::TickPlayerBody()
+{
+    const auto* PC = GetWorld()->GetFirstPlayerController();
+    auto* Player = PC ? Cast<AT5PlayerPawn>(PC->GetPawn()) : nullptr;
+    if (Player)
+        Player->SetCameraDistance(PlayerCameraDistance);
+    if (!Player || PC->GetViewTarget() != Player || !Player->IsThirdPerson() || bStartupPreparing
+        || bRestoringCheckpoint || (bSceneLoading && bFullLoadingScreen))
+    {
+        if (auto* Body = PlayerBody.Get()) Body->SetActorHiddenInGame(true);
+        return;
+    }
+    bool bDrawn = false;
+    const auto Key = Papyrus->PlayerViewKey(bDrawn);
+    if (Key && Key != PlayerBodyKey && !bSceneLoading)
+    {
+        DestroyPlayerBody();
+        PlayerBodyKey = Key;
+        const auto Data = Papyrus->PlayerBody();
+        FString Error = Data ? Data->Error : TEXT("Bridge unavailable");
+        if (Data && Error.IsEmpty())
+            PlayerBody = BuildCharacterPreview(*Data, Error, false);
+        if (auto* Body = PlayerBody.Get())
+        {
+            const auto Model = ReadJson(*Data, TEXT("body.json"));
+            PlayerBodyScale = Model ? Model->GetNumberField(TEXT("scale")) : 1.f;
+            UE_LOG(LogT5Data, Display, TEXT("T5_PLAYER_BODY ready scale=%.3f"), PlayerBodyScale);
+        }
+        else
+            UE_LOG(LogT5Data, Warning, TEXT("T5_PLAYER_BODY_ERROR %s"), *Error);
+    }
+    auto* Body = PlayerBody.Get();
+    if (!Body) return;
+    const auto Velocity = Player->GetVelocity();
+    const auto Speed = Velocity.Size2D();
+    const bool bMoving = Speed > 12.f;
+    const float Yaw = !bDrawn && bMoving ? Velocity.Rotation().Yaw : PC->GetControlRotation().Yaw;
+    Body->SetActorTransform(FTransform(FRotator(0, Yaw, 0), Player->Feet(), GetActorScale3D() * PlayerBodyScale));
+    Body->SetActorHiddenInGame(false);
+    const FString Gait = !bMoving ? TEXT("T5Idle") : Speed < 180.f ? TEXT("T5Walk") : TEXT("T5Run");
+    if (PlayerBodyGait != Gait)
+    {
+        PlayerBodyGait = Gait;
+        TInlineComponentArray<USkeletalMeshComponent*> Meshes(Body);
+        for (auto* Mesh : Meshes)
+        {
+            FString Error;
+            if (!PlayLocomotion(*Mesh, PlayerBodyProject, Gait, 1.f, {}, Error) && !Error.IsEmpty())
+                UE_LOG(LogT5Data, Warning, TEXT("T5_PLAYER_BODY_ANIMATION %s"), *Error);
+        }
+    }
+}
+
+AActor* AT5Scene::BuildCharacterPreview(const FT5LoadResult& Data, FString& Error, bool bPreview)
 {
     auto Manifest = ReadJson(Data, TEXT("meshes.json"));
     if (!Manifest) { Error = TEXT("Нет геометрии персонажа"); return nullptr; }
@@ -2805,10 +2962,11 @@ AActor* AT5Scene::BuildCharacterPreview(const FT5LoadResult& Data, FString& Erro
     if (!Actor) return nullptr;
     auto* Root = NewObject<USceneComponent>(Actor); Actor->SetRootComponent(Root); Root->RegisterComponent();
     Actor->SetActorHiddenInGame(true);
-    Actor->Tags.Add(TEXT("T5PlayerCustomization"));
+    Actor->Tags.Add(bPreview ? TEXT("T5PlayerCustomization") : TEXT("T5PlayerBody"));
     FMaterialFactory Factory{Actor, Data, RecentTextures};
     TMap<FString, TArray<FT5SkinSection>> Groups;
     const auto& Rigs = Manifest->GetObjectField(TEXT("rigs"));
+    const auto Morphs = bPreview ? nullptr : ReadJson(Data, TEXT("morphs.json"));
     for (const auto& Value : Manifest->GetArrayField(TEXT("sections")))
     {
         auto Section = Value->AsObject(); FString Rig;
@@ -2822,13 +2980,23 @@ AActor* AT5Scene::BuildCharacterPreview(const FT5LoadResult& Data, FString& Erro
         {
             Component->SetCastShadow(true); ++Count;
             Component->SetLightingChannels(true, false, false);
-            FString Project, MotionError;
-            if (!Sections.IsEmpty() && Sections[0].Data->TryGetStringField(TEXT("animationProject"), Project))
-                PlayLocomotion(*Component, Project, TEXT("T5Idle"), 1.f, {}, MotionError);
-            Component->GlobalAnimRateScale=0;
-            Component->SetComponentTickEnabled(false);
-            Component->TickAnimation(0,false);
-            Component->RefreshBoneTransforms();
+            if (!bPreview)
+            {
+                Sections[0].Data->TryGetStringField(TEXT("animationProject"), PlayerBodyProject);
+                if (Morphs)
+                    for (const auto& [Name, Value] : Morphs->Values)
+                        Component->SetMorphTarget(FName(*Name), Value->AsNumber());
+            }
+            else
+            {
+                FString Project, MotionError;
+                if (Sections[0].Data->TryGetStringField(TEXT("animationProject"), Project))
+                    PlayLocomotion(*Component, Project, TEXT("T5Idle"), 1.f, {}, MotionError);
+                Component->GlobalAnimRateScale=0;
+                Component->SetComponentTickEnabled(false);
+                Component->TickAnimation(0,false);
+                Component->RefreshBoneTransforms();
+            }
         }
     if (!Count) { Actor->Destroy(); Error = TEXT("Не удалось построить модель персонажа"); return nullptr; }
     return Actor;

@@ -1,4 +1,5 @@
 #include "T5Scene.h"
+#include "T5PlayerPawn.h"
 #include "T5Bridge.h"
 #include "T5Coordinates.h"
 #include "T5MenuStyle.h"
@@ -628,6 +629,8 @@ void AT5Scene::AttackPlayerWeapon()
     float Reach = 0;
     if (!Controller || !Papyrus->PlayerWeapon(0, 0, &Reach)) return;
     FVector Eye; FRotator View; Controller->GetPlayerViewPoint(Eye, View);
+    if (const auto* Pawn = Cast<AT5PlayerPawn>(Controller->GetPawn()))
+        Eye = Pawn->GetPawnViewLocation();
     if (Reach < 0)
     {
         const auto Root = GetActorTransform();

@@ -1,5 +1,6 @@
 #include "T5ReferenceAnimation.h"
 #include "T5Scene.h"
+#include "T5PlayerPawn.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "T5Bridge.h"
@@ -56,7 +57,10 @@ bool FT5PapyrusSmoke::AimAtLever(AT5Scene& Scene, APlayerController& Controller)
                     FCollisionQueryParams(SCENE_QUERY_STAT(T5PapyrusSmoke), true, Pawn))
                 && Hit.GetComponent() == Component)
             {
-                Pawn->SetActorLocation(Eye, false, nullptr, ETeleportType::TeleportPhysics);
+                if (auto* Player = Cast<AT5PlayerPawn>(Pawn))
+                    Player->PlaceFeet(Player->Feet() + Eye - Player->GetPawnViewLocation());
+                else
+                    Pawn->SetActorLocation(Eye, false, nullptr, ETeleportType::TeleportPhysics);
                 Controller.SetControlRotation((Point - Eye).Rotation());
                 return true;
             }

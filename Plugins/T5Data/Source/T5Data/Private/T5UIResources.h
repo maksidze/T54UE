@@ -11,6 +11,7 @@
 struct FT5UIBitmap
 {
     FIntPoint Size = FIntPoint::ZeroValue;
+    int32 Shapes = 1;
     TArray<FColor> Pixels;
     FString Source, Symbol;
 };

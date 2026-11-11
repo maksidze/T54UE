@@ -20,6 +20,12 @@ struct FT5HkxAnnotation
     bool bOnce = false;
 };
 
+struct FT5HkxRagdoll
+{
+    TArray<FName> Bodies;
+    TArray<TPair<FName, FName>> Joints;
+};
+
 struct FT5HkxClip
 {
     TArray<FT5HkxBone> Bones;
@@ -59,6 +65,7 @@ struct FT5HkxPlayback
 };
 
 bool ReadT5HkxClip(TConstArrayView<uint8> Skeleton, TConstArrayView<uint8> Animation, FT5HkxClip& Out, FString& Error);
+bool ReadT5HkxRagdoll(TConstArrayView<uint8> Skeleton, FT5HkxRagdoll& Out);
 bool RemapT5HkxBoneWeights(TConstArrayView<uint8> ReferenceRig, const TArray<FT5HkxBone>& Target,
     TArray<float>& Weights, FString& Error);
 bool ResolveT5HkxEvent(TConstArrayView<uint8> Graph, const FString& Event, FT5HkxPlayback& Out, FString& Error);

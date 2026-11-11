@@ -129,6 +129,7 @@ namespace
     struct FPlaced
     {
         int32 Character = 0, First = 0;
+        int32 ClipDepth = 0;
         FMatrix2 Matrix;
         float Alpha = 1;
         FString Name;
@@ -431,6 +432,8 @@ namespace
             Bits.Word();
         if (Flags & 32)
             Item.Name = Bits.String().ToLower();
+        if (Flags & 64)
+            Item.ClipDepth = Bits.Word();
         return Bits.bValid;
     }
 
@@ -630,6 +633,94 @@ namespace
                 return Child;
         return nullptr;
     }
+
+    struct FArtLayer
+    {
+        FMatrix2 Matrix;
+        float Alpha;
+        FBox2f Bounds;
+        FT5UIBitmap Bitmap;
+    };
+
+    bool GatherArt(const TMap<int32, FArtSymbol>& Symbols, int32 Id, const FMatrix2& Matrix, float Alpha,
+        TArray<FArtLayer>& Layers, int32 Depth = 0)
+    {
+        const auto* Symbol = Symbols.Find(Id);
+        if (!Symbol || Alpha <= 0) return true; // Text and bitmap characters are painted separately by Slate.
+        if (Depth >= 8 || Layers.Num() >= 32) return false;
+        if (Symbol->Code == 39)
+        {
+            auto Frame = FirstFrame(Symbol);
+            Frame.KeySort(TLess<int32>());
+            for (const auto& [Layer, Item] : Frame)
+                if (Item.ClipDepth || !GatherArt(Symbols, Item.Character, Matrix.Child(Item.Matrix),
+                    Alpha * Item.Alpha, Layers, Depth + 1))
+                    return false;
+            return true;
+        }
+        FArtLayer Layer{Matrix, Alpha};
+        FBits Tag = Symbol->Tag;
+        if (!RasterizeShape(Tag, Symbol->Code == 32, Layer.Bounds, Layer.Bitmap, 768))
+            return false;
+        Layers.Add(MoveTemp(Layer));
+        return true;
+    }
+
+    bool CompositeArt(const TMap<int32, FArtSymbol>& Symbols, int32 Id, FT5UIBitmap& Out)
+    {
+        TArray<FArtLayer> Layers;
+        if (!GatherArt(Symbols, Id, {}, 1.f, Layers) || Layers.Num() < 2)
+            return false;
+        FBox2f Bounds(ForceInit);
+        TArray<FBox2f> StageBounds;
+        for (const auto& Layer : Layers)
+        {
+            const FVector2f Min = Layer.Bounds.Min, Max = Layer.Bounds.Max;
+            FBox2f Box(ForceInit);
+            for (const auto Corner : {Min, Max, FVector2f(Min.X, Max.Y), FVector2f(Max.X, Min.Y)})
+                Box += Layer.Matrix.Point(Corner);
+            StageBounds.Add(Box);
+            Bounds += Box;
+        }
+        const FVector2f Size = Bounds.GetSize();
+        if (Size.ContainsNaN() || Size.GetMin() <= 0) return false;
+        const float Texel = FMath::Max(10.f, Size.GetMax() / 767.f);
+        Out.Size = {FMath::CeilToInt(Size.X / Texel), FMath::CeilToInt(Size.Y / Texel)};
+        Out.Pixels.Init(FColor::Transparent, Out.Size.X * Out.Size.Y);
+        for (int32 Index = 0; Index < Layers.Num(); ++Index)
+        {
+            const auto& Layer = Layers[Index];
+            const auto& M = Layer.Matrix;
+            const float Det = M.X.X * M.Y.Y - M.X.Y * M.Y.X;
+            if (FMath::IsNearlyZero(Det)) continue;
+            const auto Start = (StageBounds[Index].Min - Bounds.Min) / Texel;
+            const auto End = (StageBounds[Index].Max - Bounds.Min) / Texel;
+            const int32 LastX = FMath::Min(Out.Size.X, FMath::CeilToInt(End.X));
+            const int32 LastY = FMath::Min(Out.Size.Y, FMath::CeilToInt(End.Y));
+            const FVector2f LocalSize = Layer.Bounds.GetSize();
+            for (int32 Y = FMath::Max(0, FMath::FloorToInt(Start.Y)); Y < LastY; ++Y)
+                for (int32 X = FMath::Max(0, FMath::FloorToInt(Start.X)); X < LastX; ++X)
+                {
+                    const auto D = (Bounds.Min + FVector2f(X + .5f, Y + .5f) * Texel - M.T) / Det;
+                    const auto Local = FVector2f(D.X * M.Y.Y - D.Y * M.Y.X, D.Y * M.X.X - D.X * M.X.Y) - Layer.Bounds.Min;
+                    const int32 SrcX = FMath::FloorToInt(Local.X / LocalSize.X * Layer.Bitmap.Size.X);
+                    const int32 SrcY = FMath::FloorToInt(Local.Y / LocalSize.Y * Layer.Bitmap.Size.Y);
+                    if (SrcX < 0 || SrcY < 0 || SrcX >= Layer.Bitmap.Size.X || SrcY >= Layer.Bitmap.Size.Y) continue;
+                    FLinearColor Source(Layer.Bitmap.Pixels[SrcY * Layer.Bitmap.Size.X + SrcX]);
+                    Source.A *= Layer.Alpha;
+                    if (Source.A <= 0) continue;
+                    auto& Pixel = Out.Pixels[Y * Out.Size.X + X];
+                    const FLinearColor Dest(Pixel);
+                    const float Remainder = Dest.A * (1.f - Source.A);
+                    const float Alpha = Source.A + Remainder;
+                    auto Mixed = (Source * Source.A + Dest * Remainder) / Alpha;
+                    Mixed.A = Alpha;
+                    Pixel = Mixed.ToFColorSRGB();
+                }
+        }
+        Out.Shapes = Layers.Num();
+        return true;
+    }
 }
 
 void ImportT5UIFonts(TConstArrayView<uint8> Swf, FT5UIFontSet& Fonts)
@@ -731,17 +822,20 @@ TMap<FName, FT5UIBitmap> ImportT5UIArt(TConstArrayView<uint8> Swf, const TCHAR* 
     {
         TArray<FString> Parts;
         FString(Path).ToLower().ParseIntoArray(Parts, TEXT("/"));
+        if (Parts.IsEmpty()) continue;
         int32 Id = Exports.FindRef(Parts[0]);
         for (int32 Index = 1; Id && Index < Parts.Num(); ++Index)
             Id = Child(Id, Parts[Index]);
-        const FArtSymbol* Symbol = FindVector(Symbols, Id);
-        if (!Symbol)
-            continue;
         FT5UIBitmap Bitmap;
-        FBox2f Bounds;
-        FBits Tag = Symbol->Tag;
-        if (RasterizeShape(Tag, Symbol->Code == 32, Bounds, Bitmap, 768)
-            && Bitmap.Pixels.ContainsByPredicate([](FColor Pixel) { return Pixel.A > 0; }))
+        if (!CompositeArt(Symbols, Id, Bitmap))
+        {
+            const auto* Symbol = FindVector(Symbols, Id);
+            if (!Symbol) continue;
+            FBox2f Bounds;
+            FBits Tag = Symbol->Tag;
+            if (!RasterizeShape(Tag, Symbol->Code == 32, Bounds, Bitmap, 768)) continue;
+        }
+        if (Bitmap.Pixels.ContainsByPredicate([](FColor Pixel) { return Pixel.A > 0; }))
         {
             Bitmap.Source = Source;
             Bitmap.Symbol = Path;

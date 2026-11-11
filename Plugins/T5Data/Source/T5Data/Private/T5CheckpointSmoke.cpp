@@ -43,7 +43,7 @@ public:
             FParse::Value(FCommandLine::Get(), TEXT("T5SaveAfter="), SaveAfter);
             if (S->SimulationTime < SaveAfter) return false;
             if (FParse::Param(FCommandLine::Get(), TEXT("T5CheckpointAfterRaceMenu")) && !(Flags & FT5PapyrusRuntime::RaceMenuPending)) return false;
-            SavedTime = S->SimulationTime; SavedPlayer = Pawn->GetActorLocation(); SavedFlags = Flags; SavedControls = Controls;
+            SavedTime = S->SimulationTime; SavedPlayer = Pawn->GetPawnViewLocation(); SavedFlags = Flags; SavedControls = Controls;
             S->QuickSave();
             TArray<uint8> Data;
             Test.TestTrue(TEXT("Checkpoint written to the isolated smoke slot"), UGameplayStatics::LoadDataFromSlot(Data, TEXT("T5CheckpointSmoke"), 0));
@@ -63,7 +63,7 @@ public:
         {
             TArray<uint8> Expected;
             if (FParse::Param(FCommandLine::Get(), TEXT("T5CheckpointObserveOnly")))
-            { SavedTime = S->SimulationTime; SavedPlayer = Pawn->GetActorLocation(); SavedFlags = Flags; SavedControls = Controls; }
+            { SavedTime = S->SimulationTime; SavedPlayer = Pawn->GetPawnViewLocation(); SavedFlags = Flags; SavedControls = Controls; }
             else if (!UGameplayStatics::LoadDataFromSlot(Expected, TEXT("T5CheckpointSmokeExpected"), 0))
             { Test.AddError(TEXT("Cross-process expected checkpoint is missing")); return true; }
             if (!Expected.IsEmpty()) { FMemoryReader Reader(Expected); Reader << SavedTime << SavedPlayer << SavedFlags << SavedControls; }
@@ -74,7 +74,7 @@ public:
             Test.TestTrue(TEXT("Simulation resumes at the saved clock"), FMath::Abs(S->SimulationTime - SavedTime) < .3);
             Test.TestEqual(TEXT("Player control mask restored"), Controls, SavedControls);
             Test.TestEqual(TEXT("Quest/game flags restored"), Flags, SavedFlags);
-            Test.TestTrue(TEXT("Player restored near the saved position"), Pawn->GetActorLocation().Equals(SavedPlayer, 100));
+            Test.TestTrue(TEXT("Player restored near the saved position"), Pawn->GetPawnViewLocation().Equals(SavedPlayer, 100));
             Test.TestEqual(TEXT("All spawned references restored before reveal"), S->LoadedSpawnCount, S->Papyrus->SpawnedCount());
             Test.TestTrue(TEXT("Native state can be saved again after load"), [&] { TArray<uint8> Bytes; return S->Papyrus->SaveCheckpoint(Bytes); }());
             FT5LoadRequest References; S->Papyrus->Capture(References);
